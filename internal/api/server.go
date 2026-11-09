@@ -99,6 +99,12 @@ func (s *Server) routes() {
 	r.Handle("POST", "/api/keys", s.keyCreate)
 	r.Handle("DELETE", "/api/keys/{id}", s.keyRevoke)
 	r.Handle("GET", "/api/s3/credentials", s.s3Credentials)
+
+	// 版本更新（GitHub Releases 检测 + 一键自动更新）
+	r.Handle("GET", "/api/update/status", s.updateStatus)
+	r.Handle("POST", "/api/update/check", s.updateCheck)
+	r.Handle("POST", "/api/update/apply", s.updateApply, store.PermSystemManage)
+	r.Handle("POST", "/api/update/dismiss", s.updateDismiss)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {

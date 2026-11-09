@@ -14,6 +14,7 @@ import (
 	"github.com/Mr-losfer/s3bridge/internal/api"
 	"github.com/Mr-losfer/s3bridge/internal/app"
 	"github.com/Mr-losfer/s3bridge/internal/config"
+	"github.com/Mr-losfer/s3bridge/internal/updater"
 )
 
 // version 由 -ldflags "-X main.version=..." 注入。
@@ -44,6 +45,20 @@ func run() error {
 	if err := core.Health.Start(rootCtx); err != nil {
 		return fmt.Errorf("启动健康调度: %w", err)
 	}
+	if err := core.Updater.Start(rootCtx); err != nil {
+		return fmt.Errorf("启动版本检测: %w", err)
+	}
+
+	// 自动更新的最后一步由主流程执行：先优雅关闭监听，再用新二进制替换进程映像。
+	// 用带缓冲 channel 解耦，更新协程不会因 HTTP 请求结束被取消。
+	restartCh := make(chan string, 1)
+	core.Updater.SetRestartFunc(func(target string) error {
+		select {
+		case restartCh <- target:
+		default:
+		}
+		return nil
+	})
 
 	handler := api.New(core)
 	srv := &http.Server{
@@ -75,6 +90,18 @@ func run() error {
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			return fmt.Errorf("优雅关闭失败: %w", err)
+		}
+		return nil
+	case target := <-restartCh:
+		slog.Info("自动更新：替换完成，准备重启", "target", target)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Warn("重启前关闭服务", "err", err)
+		}
+		// 成功时进程映像被直接替换，以下代码不会执行；失败才返回错误让运维介入。
+		if err := updater.RestartSelf(target); err != nil {
+			return fmt.Errorf("自重启失败，请手动启动 %s: %w", target, err)
 		}
 		return nil
 	}

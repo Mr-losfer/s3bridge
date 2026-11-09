@@ -32,15 +32,21 @@ RUN apk add --no-cache ca-certificates tzdata wget \
  && addgroup -S s3bridge \
  && adduser -S -G s3bridge s3bridge
 WORKDIR /app
-COPY --from=build /out/s3bridge /usr/local/bin/s3bridge
-COPY --from=build /out/s3bridge-mcp /usr/local/bin/s3bridge-mcp
-RUN mkdir -p /app/data && chown -R s3bridge:s3bridge /app/data
+# 内置版本放 /app/bin；自更新版本放数据卷 /app/data/bin，由 entrypoint 优先加载。
+COPY --from=build /out/s3bridge /app/bin/s3bridge
+COPY --from=build /out/s3bridge-mcp /app/bin/s3bridge-mcp
+COPY deployments/entrypoint.sh /app/entrypoint.sh
+RUN mkdir -p /app/data/bin \
+ && chmod 0755 /app/entrypoint.sh /app/bin/s3bridge /app/bin/s3bridge-mcp \
+ && chown -R s3bridge:s3bridge /app
 USER s3bridge
 ENV S3BRIDGE_ADDR=:8080 \
     S3BRIDGE_DATA_DIR=/app/data \
+    S3BRIDGE_UPDATE_STRATEGY=container \
+    PATH=/app/data/bin:/app/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     TZ=Asia/Shanghai
 EXPOSE 8080
 VOLUME ["/app/data"]
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://127.0.0.1:8080/healthz >/dev/null 2>&1 || exit 1
-ENTRYPOINT ["/usr/local/bin/s3bridge"]
+ENTRYPOINT ["/app/entrypoint.sh"]

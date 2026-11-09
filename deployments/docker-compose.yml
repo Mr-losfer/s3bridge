@@ -25,6 +25,13 @@ services:
       S3BRIDGE_PUBLIC_URL: ${S3BRIDGE_PUBLIC_URL:-http://localhost:8080}
       S3BRIDGE_MAX_UPLOAD_BYTES: ${S3BRIDGE_MAX_UPLOAD_BYTES:-67108864}
       S3BRIDGE_LOG_LEVEL: ${S3BRIDGE_LOG_LEVEL:-info}
+      # 后台首页自动检测 GitHub Releases 并支持一键更新；新版写入数据卷，
+      # 容器重建后由 entrypoint 优先加载，不会回退到镜像内版本。
+      S3BRIDGE_UPDATE_STRATEGY: container
+      S3BRIDGE_UPDATE_AUTO_CHECK: "true"
+      S3BRIDGE_UPDATE_INTERVAL: ${S3BRIDGE_UPDATE_INTERVAL:-6h}
+      # 可选：内网/高频检测时填入只读 GitHub Token 提高 API 限额（不要写死在此文件）。
+      # S3BRIDGE_UPDATE_TOKEN: ${GITHUB_TOKEN:-}
       TZ: Asia/Shanghai
     volumes:
       - s3bridge-data:/app/data

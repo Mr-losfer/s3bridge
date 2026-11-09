@@ -4,6 +4,7 @@ import { api } from '../api'
 import { go } from '../router'
 import { notifyError } from '../toast'
 import { formatBytes, relTime, statusText, categoryLabel, fmtTime } from '../utils'
+import UpdateCard from '../components/UpdateCard.vue'
 
 const info = ref(null)
 const stats = ref(null)
@@ -44,6 +45,8 @@ onMounted(load)
         <button class="btn btn--primary" @click="go('plugins')">管理插件 →</button>
       </div>
     </div>
+
+    <UpdateCard />
 
     <div v-if="badPlugins.length" class="alert-strip">
       <div style="font-family:var(--serif);font-size:22px;line-height:1;color:var(--accent)">!</div>

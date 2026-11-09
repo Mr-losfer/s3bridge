@@ -5,6 +5,7 @@ package app
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/auth"
@@ -14,6 +15,7 @@ import (
 	"github.com/Mr-losfer/s3bridge/internal/plugins/workbuddy"
 	"github.com/Mr-losfer/s3bridge/internal/s3gateway"
 	"github.com/Mr-losfer/s3bridge/internal/store"
+	"github.com/Mr-losfer/s3bridge/internal/updater"
 	"github.com/Mr-losfer/s3bridge/internal/upload"
 )
 
@@ -26,6 +28,7 @@ type Core struct {
 	Uploads   *upload.Service
 	S3        *s3gateway.Gateway
 	Health    *health.Scheduler
+	Updater   *updater.Updater
 	Version   string
 	StartedAt time.Time
 }
@@ -57,9 +60,22 @@ func New(cfg *config.Config, version string) (*Core, error) {
 	uploads := upload.New(st, mgr, cfg.ObjectDir, cfg.MaxUploadBytes)
 	s3gw := s3gateway.New(st, authSvc, uploads, cfg.ObjectDir, cfg.MaxUploadBytes, "us-east-1")
 
+	upd, err := updater.New(updater.Options{
+		Current: version, Repo: cfg.UpdateRepo, APIBaseURL: cfg.UpdateAPI,
+		Token: cfg.UpdateToken, AutoCheck: cfg.UpdateAutoCheck,
+		Interval: cfg.UpdateInterval, Strategy: cfg.UpdateStrategy, DataDir: cfg.DataDir,
+		Audit: func(action, detail string) {
+			slog.Info("系统更新审计", "action", action, "detail", detail)
+		},
+	})
+	if err != nil {
+		_ = st.Close()
+		return nil, fmt.Errorf("初始化版本更新器: %w", err)
+	}
+
 	return &Core{
 		Cfg: cfg, Store: st, Auth: authSvc, Registry: reg, Plugins: mgr,
-		Uploads: uploads, S3: s3gw, Health: health.New(mgr),
+		Uploads: uploads, S3: s3gw, Health: health.New(mgr), Updater: upd,
 		Version: version, StartedAt: time.Now().UTC(),
 	}, nil
 }
@@ -68,6 +84,9 @@ func New(cfg *config.Config, version string) (*Core, error) {
 func (c *Core) Close() error {
 	if c.Health != nil {
 		c.Health.Stop()
+	}
+	if c.Updater != nil {
+		c.Updater.Stop()
 	}
 	if c.Store != nil {
 		return c.Store.Close()

@@ -10,8 +10,8 @@ all: fmt vet test build
 
 ## build: 构建主服务与 MCP 服务（前端产物已随仓库提供，无需 Node）
 build:
-	go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/s3bridge
-	go build -ldflags "$(LDFLAGS)" -o bin/$(MCP_BINARY) ./cmd/s3bridge-mcp
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/s3bridge
+	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(MCP_BINARY) ./cmd/s3bridge-mcp
 
 ## fmt: gofmt 检查（有输出表示未格式化）
 fmt:

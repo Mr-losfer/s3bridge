@@ -62,6 +62,14 @@ func (s *Server) Tools() []Tool {
 				"healthEnabled": boolProp("是否开启定时健康检测"), "healthIntervalSecs": numProp("全局默认检测间隔（秒）"),
 				"alertOnFailure": boolProp("插件异常时是否生成告警"), "announcement": strProp("站点公告"),
 			})},
+		{Name: "system_update_status", Description: "查看版本更新状态：当前版本、GitHub Releases 最新版、结构化更新要点（含重点标注）、自动更新进度与部署策略",
+			InputSchema: schema(map[string]any{})},
+		{Name: "system_update_check", Description: "立即从 GitHub Releases 检测最新版本；返回是否有更新、版本号、发布时间与重要更新内容",
+			InputSchema: schema(map[string]any{"force": boolProp("强制刷新，忽略 30 秒节流（默认 false）")})},
+		{Name: "system_update_apply", Description: "一键自动更新到最新版本：下载发布资产 → 校验 SHA256 → 备份 → 原子替换 → 自动重启服务；需 system:manage 权限",
+			InputSchema: schema(map[string]any{})},
+		{Name: "system_update_dismiss", Description: "忽略指定版本的新版本弹窗（首页更新卡片仍然显示）",
+			InputSchema: schema(map[string]any{"tag": strProp("要忽略的版本号，例如 v1.1.0")}, "tag")},
 
 		{Name: "plugin_list", Description: "查看插件列表（异常插件排在前面，含状态、版本、参数警告）",
 			InputSchema: schema(map[string]any{})},
@@ -240,7 +248,44 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			}
 			return nil
 		})
+		if c.Updater != nil {
+			us := c.Updater.Status()
+			info["updateAvailable"] = us.UpdateAvailable
+			info["latestVersion"] = ""
+			if us.Latest != nil {
+				info["latestVersion"] = us.Latest.Tag
+			}
+		}
 		return ok(info)
+
+	case "system_update_status":
+		return ok(c.Updater.Status())
+
+	case "system_update_check":
+		force, _ := args["force"].(bool)
+		st, err := c.Updater.Check(ctx, force)
+		if err != nil {
+			return fail(err)
+		}
+		return ok(st)
+
+	case "system_update_apply":
+		if err := perm(store.PermSystemManage); err != nil {
+			return fail(err)
+		}
+		a, err := c.Updater.Apply(actor)
+		if err != nil {
+			return fail(err)
+		}
+		return ok(a)
+
+	case "system_update_dismiss":
+		tag, _ := args["tag"].(string)
+		if tag == "" {
+			return fail(errors.New("tag 不能为空"))
+		}
+		c.Updater.Dismiss(tag)
+		return ok(map[string]any{"dismissed": tag, "note": "首页更新卡片仍会显示该版本"})
 
 	case "site_stats":
 		var stats map[string]any

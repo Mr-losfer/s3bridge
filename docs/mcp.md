@@ -61,7 +61,7 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ---
 
-## 2. 工具清单（33 个）
+## 2. 工具清单（37 个）
 
 ### 站点与系统
 
@@ -71,6 +71,12 @@ curl -s -X POST http://localhost:8080/mcp \
 | `site_stats` | 按文件类型/桶/插件的分布、插件状态统计、告警与变更数 | — |
 | `system_settings_get` | 查看系统设置 | — |
 | `system_settings_update` | 修改站点名、默认插件、健康检测总开关、告警开关、公告 | `siteName` `defaultPlugin` `healthEnabled` `healthIntervalSecs` `alertOnFailure` `announcement` |
+| `system_update_status` | 查看当前版本、Releases 最新版、结构化更新要点（含重点标注）、自动更新进度与部署策略 | — |
+| `system_update_check` | 立即从 GitHub Releases 检测最新版本 | `force` |
+| `system_update_apply` | **一键自动更新**：下载 → SHA256 校验 → 备份 → 原子替换 → 自动重启；返回后轮询 `system_update_status` 查看进度 | — |
+| `system_update_dismiss` | 忽略指定版本的新版本弹窗（首页卡片仍显示） | `tag` |
+
+> 版本更新工具与后台「版本更新卡片」共用同一份状态机。`site_info` 也会返回 `updateAvailable` / `latestVersion`，便于 AI 巡检时一并判断是否需要升级。
 
 ### 插件开发与运维
 
@@ -226,7 +232,8 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ## 5. 安全说明
 
-- 所有写操作都要求对应权限；`plugin_debug` 需要 `plugin:debug`，`system_settings_update` 需要 `system:manage`，`user_*` 需要 `user:manage`。
+- 所有写操作都要求对应权限；`plugin_debug` 需要 `plugin:debug`，`system_settings_update` 与 `system_update_apply` 需要 `system:manage`，`user_*` 需要 `user:manage`。
+- `system_update_apply` 会替换服务自身的可执行文件，因此额外要求：Release 必须带 `checksums.txt` 且 SHA256 匹配、下载域名在白名单内、服务已启用自重启能力；任一条件不满足都会中止并回滚。
 - 工具返回的敏感参数一律脱敏，SecretAccessKey 明文只在 `apikey_create` 的响应中出现一次。
 - 每次变更都会写入 `ChangeLog`，记录 actor（MCP 调用者用户名）、动作与 diff，可在后台或 `plugin_changes` 中回溯。
 - 令牌请通过环境变量传给 stdio 进程，不要写进配置文件并提交仓库。

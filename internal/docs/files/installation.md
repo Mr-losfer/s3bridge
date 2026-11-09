@@ -219,6 +219,12 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 | `S3BRIDGE_HEALTH_INTERVAL` | `5m` | 全局默认健康检测间隔，最小 10s |
 | `S3BRIDGE_SESSION_TTL` | `24h` | 登录 JWT 有效期 |
 | `S3BRIDGE_READ_TIMEOUT` | `60s` | HTTP 读超时 |
+| `S3BRIDGE_UPDATE_REPO` | `Mr-losfer/s3bridge` | 检测更新所用的 GitHub 仓库（`owner/repo`） |
+| `S3BRIDGE_UPDATE_API` | `https://api.github.com` | Releases API 地址；自建镜像或本地测试可覆盖 |
+| `S3BRIDGE_UPDATE_TOKEN` | 空 | 可选 GitHub Token，用于提高 API 限额；**只走环境变量，绝不写入仓库文件** |
+| `S3BRIDGE_UPDATE_INTERVAL` | `6h` | 自动检测间隔，最小 `1m` |
+| `S3BRIDGE_UPDATE_AUTO_CHECK` | `true` | 是否启用定时检测；关闭后仍可在后台手动点「检测更新」 |
+| `S3BRIDGE_UPDATE_STRATEGY` | `auto` | `auto`（自动识别容器）/ `binary` / `container` |
 
 > **密钥管理**：未显式设置 `S3BRIDGE_MASTER_KEY` 时，服务会在数据目录生成 `master.key`（权限 0600）。**丢失这个文件等于丢失所有已加密的插件参数与 API Key**，请连同 `state.json` 一起备份。
 
@@ -273,7 +279,35 @@ s3.example.com {
 
 ---
 
-## 9. 备份、升级与卸载
+## 9. 版本更新、备份与卸载
+
+### 9.1 后台一键自动更新（推荐）
+
+后台首页顶部固定显示「版本更新卡片」。服务每 6 小时自动从本仓库 GitHub Releases 检测最新版，也可以点「检测更新」立即检查。发现新版本时：
+
+1. 卡片显示 `当前版本 → 最新版本`，并把 **重要 / 安全 / 破坏性变更** 以及 Release Notes 中加粗的内容高亮标出；
+2. 登录后自动弹出新版本弹窗，展示完整结构化更新内容（可「稍后提醒」或「忽略此版本」）；
+3. 管理员点击「立即更新」后自动完成：下载当前平台发布资产 → 校验 `checksums.txt` 的 SHA256 → 备份旧版本到 `data/updates/` → 原子替换可执行文件 → 优雅关闭并原地重启 → 前端自动刷新显示新版本。**全程无需 SSH 或手工敲命令**，进度与日志在弹窗中实时可见。
+
+安全约束：
+
+- 仅允许从 GitHub 官方域名白名单下载（含 302 重定向目标），被篡改的资产地址会被拒绝；
+- 缺少 `checksums.txt` 或 SHA256 不匹配时直接中止，不安装；
+- 下载、校验、替换、重启任一阶段失败都会从备份自动回滚，服务保持可用；
+- 更新接口需要 `system:manage` 权限，普通用户可查看更新内容但不能触发安装。
+
+不同部署方式的行为：
+
+| 部署方式 | 新版本写入位置 | 重启 / 重建后是否保持 |
+| --- | --- | --- |
+| Linux 二进制 / systemd | 当前可执行文件（同目录原子替换） | 是，磁盘文件已替换 |
+| Docker 单容器 / Compose | 数据卷 `/app/data/bin/s3bridge` | 是，`entrypoint.sh` 优先加载数据卷版本，重建容器不回退 |
+
+容器部署若还想同步更新官方镜像，更新完成弹窗会给出可复制命令：`docker compose pull && docker compose up -d`。
+
+如不希望自动检测，设置 `S3BRIDGE_UPDATE_AUTO_CHECK=false`；内网环境可通过 `S3BRIDGE_UPDATE_TOKEN` 提高 GitHub API 限额。
+
+### 9.2 手动备份与升级
 
 ```bash
 # 备份（先停服务保证 JSON 一致；运行中也可用，Store 是原子写）

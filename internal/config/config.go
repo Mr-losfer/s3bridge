@@ -30,6 +30,12 @@ const (
 	EnvHealthInterval = "S3BRIDGE_HEALTH_INTERVAL"
 	EnvSessionTTL     = "S3BRIDGE_SESSION_TTL"
 	EnvReadTimeout    = "S3BRIDGE_READ_TIMEOUT"
+	EnvUpdateRepo     = "S3BRIDGE_UPDATE_REPO"
+	EnvUpdateAPI      = "S3BRIDGE_UPDATE_API"
+	EnvUpdateToken    = "S3BRIDGE_UPDATE_TOKEN"
+	EnvUpdateInterval = "S3BRIDGE_UPDATE_INTERVAL"
+	EnvUpdateAuto     = "S3BRIDGE_UPDATE_AUTO_CHECK"
+	EnvUpdateStrategy = "S3BRIDGE_UPDATE_STRATEGY"
 )
 
 // Config 是不可变的运行时配置快照。
@@ -48,6 +54,12 @@ type Config struct {
 	SessionTTL         time.Duration
 	ReadTimeout        time.Duration
 	WriteTimeout       time.Duration
+	UpdateRepo         string
+	UpdateAPI          string
+	UpdateToken        string
+	UpdateInterval     time.Duration
+	UpdateAutoCheck    bool
+	UpdateStrategy     string
 }
 
 // Load 读取环境变量并做合法性校验。
@@ -64,6 +76,12 @@ func Load() (*Config, error) {
 		SessionTTL:         envDuration(EnvSessionTTL, 24*time.Hour),
 		ReadTimeout:        envDuration(EnvReadTimeout, 60*time.Second),
 		WriteTimeout:       60 * time.Second,
+		UpdateRepo:         env(EnvUpdateRepo, "Mr-losfer/s3bridge"),
+		UpdateAPI:          env(EnvUpdateAPI, "https://api.github.com"),
+		UpdateToken:        os.Getenv(EnvUpdateToken), // 仅走环境变量，绝不落盘
+		UpdateInterval:     envDuration(EnvUpdateInterval, 6*time.Hour),
+		UpdateAutoCheck:    envBool(EnvUpdateAuto, true),
+		UpdateStrategy:     env(EnvUpdateStrategy, "auto"),
 	}
 	if c.MaxUploadBytes <= 0 {
 		return nil, fmt.Errorf("%s 必须为正数", EnvMaxUploadBytes)
@@ -134,6 +152,21 @@ func envInt64(k string, def int64) int64 {
 		}
 	}
 	return def
+}
+
+func envBool(k string, def bool) bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(k)))
+	if v == "" {
+		return def
+	}
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func envDuration(k string, def time.Duration) time.Duration {

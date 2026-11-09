@@ -1,9 +1,11 @@
 <script setup>
-import { computed, onMounted, ref, onUnmounted } from 'vue'
+import { computed, onMounted, ref, onUnmounted, watch } from 'vue'
 import { route, go, navGroups } from './router'
 import { session, can, refreshSession, logout, currentTheme, applyTheme } from './session'
 import { toasts } from './toast'
 import { isLoggedIn } from './api'
+import { update, loadUpdateStatus, openUpdateModal } from './update'
+import UpdateModal from './components/UpdateModal.vue'
 import Login from './views/Login.vue'
 import Overview from './views/Overview.vue'
 import Plugins from './views/Plugins.vue'
@@ -26,6 +28,12 @@ const views = {
 const view = computed(() => views[route.value.name] || Overview)
 const theme = ref(currentTheme())
 const busy = ref(false)
+
+// 版本号可能来自 ldflags（v1.1.0）或开发构建（dev），统一只保留一个 v 前缀。
+const displayVersion = computed(() => {
+  const v = session.version || 'dev'
+  return /^v/i.test(v) ? v : 'v' + v
+})
 
 const visibleGroups = computed(() => navGroups.map((g) => ({
   ...g,
@@ -50,6 +58,14 @@ async function refresh() {
 }
 function onUnauthorized() { session.user = null }
 function onLoggedIn() { refreshSession() }
+
+// 用登录态变化统一驱动更新检测：无论是首次登录、刷新页面还是重新登录，
+// 都只会走这一条路径，避免依赖 Login 组件的事件时机。
+watch(
+  () => !!session.user,
+  (loggedIn) => { if (loggedIn) loadUpdateStatus() },
+  { immediate: true },
+)
 
 onMounted(() => {
   applyTheme(theme.value)
@@ -84,7 +100,13 @@ onUnmounted(() => window.removeEventListener('s3bridge:unauthorized', onUnauthor
         </button>
       </div>
       <div class="sidebar-foot">
-        <div>v{{ session.version || 'dev' }} · us-east-1</div>
+        <div>
+          {{ displayVersion }} · us-east-1
+          <button
+            v-if="update.status?.updateAvailable" class="update-dot"
+            title="发现新版本，点击查看" @click="openUpdateModal"
+          >↑ 新版本</button>
+        </div>
         <div style="margin-top:4px;opacity:.7">S3 / MCP ENABLED</div>
       </div>
     </aside>
@@ -107,6 +129,8 @@ onUnmounted(() => window.removeEventListener('s3bridge:unauthorized', onUnauthor
       </div>
     </main>
   </div>
+
+  <UpdateModal v-if="session.user" />
 
   <div class="toast-stack">
     <div v-for="t in toasts" :key="t.id" class="toast" :class="{ 'is-error': t.type === 'error' }">
