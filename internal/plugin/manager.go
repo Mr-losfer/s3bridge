@@ -34,10 +34,12 @@ func (m *Manager) Store() store.Store  { return m.st }
 type View struct {
 	store.Plugin
 	Params      map[string]any `json:"params"` // 遮蔽内层 Params，避免密文外泄
+	Definition  string         `json:"-"`      // 遮蔽：完整源码由 plugin_code_get 单独返回，避免列表膨胀
 	Manifest    Manifest       `json:"manifest"`
 	Warning     string         `json:"warning"`
 	Grouped     []ParamGroup   `json:"grouped"`
 	HasManifest bool           `json:"hasManifest"`
+	Editable    bool           `json:"editable"` // 源码是否可由 MCP/后台编辑
 }
 
 type ParamGroup struct {
@@ -132,25 +134,42 @@ func (m *Manager) Get(id string) (View, error) {
 	return v, err
 }
 
+// descriptorFor 统一解析插件描述符：内置类型走编译期注册表，
+// 自定义插件从落库的声明式源码即时编译，因此改码无需重启服务。
+func (m *Manager) descriptorFor(p *store.Plugin) (Descriptor, error) {
+	if d, err := m.registry.Get(p.Kind); err == nil {
+		return d, nil
+	}
+	if p.Definition != "" {
+		d, err := ParseDefinition([]byte(p.Definition))
+		if err != nil {
+			return Descriptor{}, fmt.Errorf("插件 %s 源码损坏: %w", p.ID, err)
+		}
+		return DescriptorFromDefinition(d), nil
+	}
+	return Descriptor{}, fmt.Errorf("%w: %s", ErrUnknownKind, p.Kind)
+}
+
 func (m *Manager) viewOf(p *store.Plugin) (View, error) {
-	mf, err := m.registry.Get(p.Kind)
-	view := View{Plugin: *p, Params: map[string]any{}, Grouped: []ParamGroup{}}
+	desc, err := m.descriptorFor(p)
+	view := View{Plugin: *p, Params: map[string]any{}, Grouped: []ParamGroup{}, Editable: p.Custom}
 	if err != nil {
-		view.Warning = "插件类型未编译进当前版本，无法执行上传"
+		view.Warning = fmt.Sprintf("插件源码不可用：%v", err)
 		view.HasManifest = false
 		return view, nil
 	}
+	mf := desc.Manifest
 	view.HasManifest = true
-	view.Manifest = mf.Manifest
-	view.Params = MaskParams(mf.Manifest, p.Params)
+	view.Manifest = mf
+	view.Params = MaskParams(mf, p.Params)
 	plain, err := OpenParams(p.Params, m.open)
 	if err != nil {
 		return view, err
 	}
-	view.Warning = VolatileWarning(mf.Manifest, plain)
+	view.Warning = VolatileWarning(mf, plain)
 	// 按 Group 保序分组，供前端分区渲染动态表单。
 	seen := map[string]int{}
-	for _, f := range mf.Manifest.Params {
+	for _, f := range mf.Params {
 		idx, ok := seen[f.Group]
 		if !ok {
 			view.Grouped = append(view.Grouped, ParamGroup{Name: f.Group})
@@ -194,7 +213,7 @@ func (m *Manager) Patch(id string, patch Patch, actor string) (View, error) {
 		if err := checkRevision(p, patch.ExpectedRevision); err != nil {
 			return err
 		}
-		mf, err := m.registry.Get(p.Kind)
+		mf, err := m.descriptorFor(p)
 		if err != nil {
 			return err
 		}
@@ -271,7 +290,7 @@ func (m *Manager) Replace(id string, full Full, actor string) (View, error) {
 		if err := checkRevision(p, full.ExpectedRevision); err != nil {
 			return err
 		}
-		mf, err := m.registry.Get(p.Kind)
+		mf, err := m.descriptorFor(p)
 		if err != nil {
 			return err
 		}
@@ -339,7 +358,7 @@ func (m *Manager) Update(id string, spec UpdateSpec, actor string) (View, error)
 		if p == nil {
 			return ErrPluginNotFound
 		}
-		mf, err := m.registry.Get(p.Kind)
+		mf, err := m.descriptorFor(p)
 		if err != nil {
 			return err
 		}
@@ -426,7 +445,7 @@ func (m *Manager) loadRunnable(id string) (store.Plugin, Manifest, Uploader, map
 	if err != nil {
 		return p, mf, nil, nil, err
 	}
-	d, err := m.registry.Get(p.Kind)
+	d, err := m.descriptorFor(&p)
 	if err != nil {
 		return p, mf, nil, nil, err
 	}

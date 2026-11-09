@@ -109,6 +109,51 @@ func Descriptor() plugin.Descriptor {
 	return plugin.Descriptor{Manifest: Manifest, New: New}
 }
 
+// DefinitionTemplate 返回与 Go 实现等价的声明式插件源码。
+// Agent 可用 plugin_export / plugin_code_get 读取它，再用 plugin_create 派生新插件。
+func DefinitionTemplate() plugin.Definition {
+	return plugin.Definition{
+		Kind:        "workbuddy-template",
+		Name:        Manifest.Name,
+		Version:     Manifest.Version,
+		Description: Manifest.Description,
+		Author:      Manifest.Author,
+		Endpoint:    Manifest.Endpoint,
+		Docs:        Manifest.Docs,
+		Params:      Manifest.Params,
+		Request: plugin.RequestSpec{
+			Method: "POST", URL: "{{base_url}}{{upload_path}}", Mode: "multipart",
+			FileField: "{{file_field}}", TimeoutSecs: 30,
+			Headers: map[string]string{
+				"Authorization":     "{{authorization}}",
+				"x-user-id":         "{{x_user_id}}",
+				"x-client-version":  "{{x_client_version}}",
+				"x-client-product":  "{{x_client_product}}",
+				"x-client-platform": "{{x_client_platform}}",
+				"Cookie":            "{{cookie}}",
+				"User-Agent":        "{{user_agent}}",
+			},
+		},
+		Response: plugin.ResponseSpec{
+			Format: "json", CodePath: "code", SuccessCode: "0", MessagePath: "msg",
+			URLPath: "data.url", ObjectKeyPath: "data.objectKey",
+			FileNamePath: "data.fileInfo.fileName", SizePath: "data.fileInfo.fileSize",
+			MimeTypePath: "data.fileInfo.mimeType",
+		},
+		Health: Manifest.Health,
+	}
+}
+
+// init 在 Manifest 初始化完成后回填等价源码，避免包级初始化循环。
+func init() {
+	b, err := plugin.MarshalDefinition(ptr(DefinitionTemplate()))
+	if err == nil {
+		Manifest.Source = string(b)
+	}
+}
+
+func ptr(d plugin.Definition) *plugin.Definition { return &d }
+
 type upstreamResponse struct {
 	Code      int    `json:"code"`
 	Msg       string `json:"msg"`

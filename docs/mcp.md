@@ -61,7 +61,7 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ---
 
-## 2. 工具清单（38 个）
+## 2. 工具清单（45 个）
 
 ### 站点与系统
 
@@ -84,7 +84,14 @@ curl -s -X POST http://localhost:8080/mcp \
 | --- | --- | --- |
 | `plugin_list` | 插件列表，异常插件排前面，含状态/版本/参数警告 | — |
 | `plugin_get` | 单个插件详情：参数 Schema、分组、脱敏后的当前值 | `id` |
-| `plugin_registry` | 已编译插件类型清单与完整参数 Schema，供开发新插件 | — |
+| `plugin_registry` | 内置类型清单与完整参数 Schema，并列出所有自定义插件 | — |
+| `plugin_create` | **创建插件**：从零建立插件实例，可附完整声明式源码或从内置模板派生，创建即可用 | `kind` `name` `definition` `template` `params` `enabled` |
+| `plugin_code_get` | **读取插件源码**：完整声明式定义、规范化 JSON 与参数 Schema（内置插件返回只读等价模板） | `id` |
+| `plugin_code_upload` | **上传/全量替换源码**：即时编译生效、无需重启，带乐观锁与审计 | `id` `definition` `expectedRevision` |
+| `plugin_code_patch` | **差量修改源码**：点号路径 + `params` 按 key 合并，只改指定字段 | `id` `patch` `expectedRevision` |
+| `plugin_validate` | **静态校验源码**（不落库）：结构、模板变量、必填参数与脱敏后的请求预览 | `definition` `params` |
+| `plugin_export` | **导出源码**：`json` 可移植定义 / `go` 可内置化的 Go 插件文件 | `id` `format` |
+| `plugin_delete` | **删除自定义插件**（内置插件只能停用），变更记录保留 | `id` |
 | `plugin_docs` | 插件开发文档全文 + 实时参数模板 | `topic` |
 | `plugin_debug` | **插件调试**：无副作用地执行参数校验、临时凭据有效期检查、上游连通性探测，返回分步诊断 | `id` |
 | `plugin_patch` | **差量修改**：只更新传入字段，`params` 按键合并 | `id` `name` `description` `enabled` `priority` `params` `health` `expectedRevision` |
@@ -199,6 +206,73 @@ curl -s -X POST http://localhost:8080/mcp \
 {"name":"plugin_docs","arguments":{"topic":"ParamField"}}
 ```
 
+### 从零开发一个插件（Agent 完全掌控）
+
+不需要 Go 编译器、不需要重启服务。一份**声明式插件源码**（Plugin Source）同时描述参数 Schema、第三方 HTTP 请求模板与响应字段映射，服务端即时编译成 `Uploader`。
+
+**① 读一份可运行的参考模板**（内置 WorkBuddy 会返回等价声明式定义）：
+
+```json
+{"name":"plugin_code_get","arguments":{"id":"workbuddy"}}
+```
+
+**② 创建插件**，直接附上源码（`definition` 可传对象或 JSON 字符串）：
+
+```json
+{
+  "name": "plugin_create",
+  "arguments": {
+    "kind": "my-uploader",
+    "name": "我的上传器",
+    "enabled": true,
+    "definition": {
+      "kind": "my-uploader",
+      "name": "我的上传器",
+      "version": "1.0.0",
+      "params": [
+        {"key":"base_url","label":"服务地址","type":"url","required":true},
+        {"key":"token","label":"Token","type":"secret","sensitive":true}
+      ],
+      "request": {
+        "method": "POST", "url": "{{base_url}}/upload", "mode": "multipart",
+        "fileField": "file", "timeoutSecs": 30,
+        "headers": {"Authorization": "{{token}}"},
+        "fields": {"filename": "{{file_name}}"}
+      },
+      "response": {
+        "format": "json", "codePath": "code", "successCode": "0", "messagePath": "msg",
+        "urlPath": "data.url", "objectKeyPath": "data.objectKey",
+        "fileNamePath": "data.fileInfo.fileName", "sizePath": "data.fileInfo.fileSize",
+        "mimeTypePath": "data.fileInfo.mimeType", "expirePath": "data.expireAt"
+      }
+    }
+  }
+}
+```
+
+**③ 差量改码**：点号路径精确修改，未涉及字段保持不变；`params` 数组按 `key` 做 upsert。
+
+```json
+{"name":"plugin_code_patch","arguments":{"id":"my-uploader","patch":{
+  "request.headers.X-Client-Version": "2.8.0",
+  "response.urlPath": "data.downloadUrl",
+  "params": [{"key":"x_user_id","label":"用户 ID","type":"text","required":true}]
+}}}
+```
+
+**④ 校验 → 配参数 → 调试 → 真实上传**：
+
+```json
+{"name":"plugin_validate","arguments":{"definition":"<plugin_code_get 返回的 sourceJSON>","params":{"base_url":"https://api.example.com","token":"Bearer xxx"}}}
+{"name":"plugin_params_set","arguments":{"id":"my-uploader","params":{"base_url":"https://api.example.com","token":"Bearer xxx"}}}
+{"name":"plugin_debug","arguments":{"id":"my-uploader"}}
+{"name":"upload_test","arguments":{"fileName":"a.png","contentType":"image/png","contentBase64":"UE5HREFBUEE=","bucket":"default","pluginId":"my-uploader"}}
+```
+
+**⑤ 导出 / 内置化 / 删除**：`plugin_export` 传 `format:"go"` 得到可放进 `internal/plugins/` 的 Go 插件文件；`format:"json"` 得到可移植定义，可直接喂给另一个实例的 `plugin_create`。`plugin_delete` 删除自定义插件，变更记录仍可用 `plugin_changes` 回溯。
+
+> 所有源码写操作都要求 `plugin:write`，都带 `expectedRevision` 乐观锁，并写入 `ChangeLog`（动作：`create` / `code` / `code_patch` / `delete`）。内置插件的源码只读，想改写就用 `plugin_create` 的 `template` 参数派生一份自定义副本。
+
 ### 上传测试
 
 ```json
@@ -236,5 +310,6 @@ curl -s -X POST http://localhost:8080/mcp \
 - 所有写操作都要求对应权限；`plugin_debug` 需要 `plugin:debug`，`system_settings_update` 与 `system_update_apply` 需要 `system:manage`，`user_*` 需要 `user:manage`。
 - `system_update_apply` 会替换服务自身的可执行文件，因此额外要求：Release 必须带 `checksums.txt` 且 SHA256 匹配、下载域名在白名单内、服务已启用自重启能力；任一条件不满足都会中止并回滚。
 - 工具返回的敏感参数一律脱敏；SecretAccessKey 明文只在 `apikey_create` / `apikey_reveal` 与后台「API 密钥」页、「MCP 能力」页顶部出现，且仅密钥本人或管理员登录后可取回。密钥列表始终只返回 `secretHint` 脱敏前缀。
+- 声明式插件源码保存前做静态校验（`kind`、参数 Schema、模板变量声明、仅允许 http(s)、请求头禁止 CRLF 注入），运行时渲染后再次校验目标 URL；源码与响应体大小均有限制。`Check` 只做连通性探测，不上传真实文件。
 - 每次变更都会写入 `ChangeLog`，记录 actor（MCP 调用者用户名）、动作与 diff，可在后台或 `plugin_changes` 中回溯。
 - 令牌请通过环境变量传给 stdio 进程，不要写进配置文件并提交仓库。

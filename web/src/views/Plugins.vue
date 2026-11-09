@@ -13,6 +13,28 @@ const healthForm = ref({})
 const saving = ref(false)
 
 const unhealthyCount = computed(() => plugins.value.filter((p) => p.status === 'unhealthy').length)
+const customCount = computed(() => plugins.value.filter((p) => p.custom).length)
+
+const createOpen = ref(false)
+const creating = ref(false)
+const createForm = ref({ kind: '', name: '', version: '', description: '', template: '', enabled: true })
+
+function openCreate() {
+  createForm.value = { kind: '', name: '', version: '', description: '', template: '', enabled: true }
+  createOpen.value = true
+}
+async function submitCreate() {
+  const kind = createForm.value.kind.trim().toLowerCase()
+  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(kind)) { notifyError(new Error('插件 ID 需小写字母开头，仅含小写字母/数字/下划线/连字符')); return }
+  creating.value = true
+  try {
+    const r = await api('/plugins', { method: 'POST', body: { ...createForm.value, kind } })
+    notify('插件已创建，去详情页编写源码即可生效', { title: kind })
+    createOpen.value = false
+    await load()
+    go('plugin', r.created || kind)
+  } catch (e) { notifyError(e, '创建插件失败') } finally { creating.value = false }
+}
 
 async function load() {
   loading.value = true
@@ -83,7 +105,8 @@ async function saveHealth() {
       <div class="btn-group">
         <button class="btn" @click="checkAll">◎ 全部检测</button>
         <button class="btn" @click="load">↻ 刷新</button>
-        <button class="btn btn--primary" @click="go('docs', 'plugin-development')">开发文档 →</button>
+        <button class="btn" @click="go('docs', 'plugin-development')">开发文档 →</button>
+        <button class="btn btn--primary" @click="openCreate">＋ 创建插件</button>
       </div>
     </div>
 
@@ -142,6 +165,57 @@ async function saveHealth() {
         </p>
       </div>
     </div>
+
+    <!-- 创建插件 -->
+    <template v-if="createOpen">
+      <div class="drawer-backdrop" @click="createOpen = false"></div>
+      <aside class="drawer">
+        <div class="drawer-head">
+          <div>
+            <div class="eyebrow">New Plugin</div>
+            <h2 class="section-title">创建上传插件</h2>
+            <p class="section-note">创建一个声明式插件实例，随后在详情页编写请求模板与响应映射，即时生效、无需重启</p>
+          </div>
+          <button class="icon-btn" @click="createOpen = false">✕</button>
+        </div>
+        <div class="drawer-body">
+          <div class="form-grid">
+            <div class="field">
+              <label>插件 ID <span class="req">*</span></label>
+              <input v-model="createForm.kind" placeholder="例如 my-uploader" />
+              <div class="field-help">全局唯一，小写字母开头，仅含小写字母/数字/下划线/连字符</div>
+            </div>
+            <div class="field"><label>显示名称</label><input v-model="createForm.name" placeholder="留空则使用插件 ID" /></div>
+            <div class="field"><label>版本号</label><input v-model="createForm.version" placeholder="1.0.0" /></div>
+            <div class="field">
+              <label>起始模板</label>
+              <select v-model="createForm.template">
+                <option value="">空白骨架（可运行示例）</option>
+                <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }} · {{ p.id }}</option>
+              </select>
+              <div class="field-help">选择现有插件会导出其等价声明式源码作为起点</div>
+            </div>
+            <div class="field" style="grid-column:1/-1"><label>说明</label><textarea v-model="createForm.description" placeholder="这个插件对接哪家服务" style="min-height:70px"></textarea></div>
+            <div class="field">
+              <label>立即启用</label>
+              <div class="checkbox-row"><input type="checkbox" v-model="createForm.enabled" /><span>创建后加入可用插件池</span></div>
+            </div>
+          </div>
+          <div class="divider"></div>
+          <div class="alert-strip" style="margin:0">
+            <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">i</div>
+            <div class="alert-strip-body">
+              创建后到插件详情页的「插件源码」区写 <code class="code">request</code> / <code class="code">response</code> 映射，或用 MCP 的
+              <code class="code">plugin_code_upload</code> / <code class="code">plugin_code_patch</code> 完成开发。当前已有 {{ customCount }} 个自定义插件。
+            </div>
+          </div>
+        </div>
+        <div class="drawer-foot">
+          <button class="btn" @click="createOpen = false">取消</button>
+          <button class="btn btn--primary" :disabled="creating" @click="submitCreate">{{ creating ? '创建中…' : '创建插件' }}</button>
+        </div>
+      </aside>
+    </template>
 
     <!-- 定时检测设置抽屉 -->
     <template v-if="healthTarget">

@@ -236,7 +236,9 @@ type Plugin struct {
 	SuccessCount  int               `json:"successCount"`
 	LatencyMs     int64             `json:"latencyMs"`
 	Health        HealthConfig      `json:"health"`
-	Revision      int64             `json:"revision"` // 乐观锁，差量/全量更新用
+	Revision      int64             `json:"revision"`             // 乐观锁，差量/全量更新用
+	Definition    string            `json:"definition,omitempty"` // 自定义插件的声明式源码（JSON）
+	Custom        bool              `json:"custom"`               // 是否由 MCP/后台动态创建
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
 }

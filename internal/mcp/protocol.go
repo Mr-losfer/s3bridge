@@ -77,8 +77,10 @@ func (s *Server) Handle(ctx context.Context, data []byte, p *auth.Principal) []b
 				"resources": map[string]any{"subscribe": false, "listChanged": false},
 			},
 			"serverInfo": map[string]any{"name": "s3bridge", "version": s.version},
-			"instructions": "S3Bridge 插件化上传聚合网关。可用工具查看站点信息、管理插件与用户、" +
-				"查阅插件开发/S3 接口文档、调试插件、执行差量与全量修改、更新插件与参数。",
+			"instructions": "S3Bridge 插件化上传聚合网关。除站点/插件/用户/存储桶管理外，" +
+				"可用 plugin_create、plugin_code_get、plugin_code_upload、plugin_code_patch、" +
+				"plugin_validate、plugin_export、plugin_delete 通过声明式插件源码从零开发新插件并即时生效；" +
+				"再用 plugin_debug 与 upload_test 验证，无需重启服务。",
 		}
 	case "notifications/initialized", "notifications/cancelled":
 		return nil

@@ -52,7 +52,9 @@ func (s *Server) routes() {
 
 	// 插件（静态路径必须注册在 {id} 之前）
 	r.Handle("GET", "/api/plugins", s.namedTool("plugin_list"), store.PermPluginRead)
+	r.Handle("POST", "/api/plugins", s.namedTool("plugin_create"), store.PermPluginWrite)
 	r.Handle("GET", "/api/plugins/registry", s.namedTool("plugin_registry"), store.PermPluginRead)
+	r.Handle("POST", "/api/plugins/validate", s.namedTool("plugin_validate"))
 	r.Handle("GET", "/api/plugins/docs", s.namedTool("plugin_docs"), store.PermPluginRead)
 	r.Handle("GET", "/api/plugins/{id}", s.namedTool("plugin_get"), store.PermPluginRead)
 	r.Handle("PATCH", "/api/plugins/{id}", s.namedTool("plugin_patch"), store.PermPluginWrite)
@@ -65,6 +67,13 @@ func (s *Server) routes() {
 	r.Handle("PUT", "/api/plugins/{id}/health", s.namedTool("plugin_health_config"), store.PermPluginWrite)
 	r.Handle("GET", "/api/plugins/{id}/changes", s.namedTool("plugin_changes"), store.PermPluginRead)
 	r.Handle("POST", "/api/plugins/{id}/parse-token", s.namedTool("plugin_parse_token"), store.PermPluginWrite)
+	r.Handle("DELETE", "/api/plugins/{id}", s.namedTool("plugin_delete"), store.PermPluginWrite)
+
+	// 插件源码：Agent / 后台通过同一套 MCP 工具读写声明式插件定义
+	r.Handle("GET", "/api/plugins/{id}/source", s.namedTool("plugin_code_get"), store.PermPluginRead)
+	r.Handle("PUT", "/api/plugins/{id}/source", s.namedTool("plugin_code_upload"), store.PermPluginWrite)
+	r.Handle("PATCH", "/api/plugins/{id}/source", s.namedTool("plugin_code_patch"), store.PermPluginWrite)
+	r.Handle("GET", "/api/plugins/{id}/export", s.namedTool("plugin_export"), store.PermPluginRead)
 
 	// 告警
 	r.Handle("GET", "/api/alerts", s.namedTool("alerts_list"), store.PermPluginRead)

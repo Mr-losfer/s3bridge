@@ -66,8 +66,9 @@ type Manifest struct {
 	Capabilities []string     `json:"capabilities"`
 	Params       []ParamField `json:"params"`
 	Health       HealthHint   `json:"health"`
-	Docs         string       `json:"docs"`       // 该插件的接入说明（Markdown）
-	SampleCode   string       `json:"sampleCode"` // 插件开发文档中的示例代码
+	Docs         string       `json:"docs"`             // 该插件的接入说明（Markdown）
+	SampleCode   string       `json:"sampleCode"`       // 插件开发文档中的示例代码
+	Source       string       `json:"source,omitempty"` // 等价的声明式插件源码（内置插件可选提供，供 Agent 派生）
 }
 
 // UploadRequest 是统一后的上传输入。

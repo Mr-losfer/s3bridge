@@ -121,6 +121,39 @@ func (s *Server) Tools() []Tool {
 			InputSchema: schema(map[string]any{"authorization": strProp("Bearer Token 或完整 Authorization 头")}, "authorization")},
 		{Name: "plugin_registry", Description: "查看已编译进服务端的插件类型清单与完整参数 Schema，用于开发新插件",
 			InputSchema: schema(map[string]any{})},
+		{Name: "plugin_create", Description: "创建插件：从零建立新的上传插件实例（可附完整声明式源码、或从内置插件模板派生），创建后立即进入插件列表并可被 upload_test 调用",
+			InputSchema: schema(map[string]any{
+				"kind": strProp("插件 ID，全局唯一，小写字母开头，如 my-uploader"),
+				"name": strProp("显示名称"), "description": strProp("说明"),
+				"version": strProp("版本号"), "author": strProp("作者"),
+				"enabled":    boolProp("创建后是否立即启用，默认 true"),
+				"definition": objProp("完整声明式插件源码（对象或 JSON 字符串）；留空生成可运行骨架"),
+				"template":   strProp("从内置插件导出等价源码作为起点，如 workbuddy"),
+				"params":     objProp("初始参数键值对"),
+			}, "kind")},
+		{Name: "plugin_code_get", Description: "读取插件源码：返回完整声明式定义、规范化 JSON 与参数 Schema；内置插件返回只读的等价模板",
+			InputSchema: schema(map[string]any{"id": id}, "id")},
+		{Name: "plugin_code_upload", Description: "上传/全量替换插件源码：即时编译生效，无需重启；仅自定义插件可改，带乐观锁与审计",
+			InputSchema: schema(map[string]any{
+				"id": id, "definition": objProp("完整声明式插件源码（对象或 JSON 字符串）"),
+				"expectedRevision": numProp("乐观锁版本号，可选"),
+			}, "id", "definition")},
+		{Name: "plugin_code_patch", Description: "差量修改插件源码：只改指定字段，支持点号路径（如 request.headers.Authorization）与 params 按 key upsert，未涉及字段保持不变",
+			InputSchema: schema(map[string]any{
+				"id": id, "patch": objProp("要修改的字段，支持点号路径；值为 null 表示删除该字段"),
+				"expectedRevision": numProp("乐观锁版本号，可选"),
+			}, "id", "patch")},
+		{Name: "plugin_validate", Description: "静态校验插件源码（不落库）：结构、模板变量、参数必填与请求预览，敏感值自动脱敏",
+			InputSchema: schema(map[string]any{
+				"definition": objProp("待校验的声明式插件源码（对象或 JSON 字符串）"),
+				"params":     objProp("用于渲染预览的参数值"),
+			}, "definition")},
+		{Name: "plugin_export", Description: "导出插件源码：format=json 得到可移植定义，format=go 得到可内置进二进制的 Go 插件文件源码",
+			InputSchema: schema(map[string]any{
+				"id": id, "format": strProp("json 或 go，默认 json"),
+			}, "id")},
+		{Name: "plugin_delete", Description: "删除自定义插件（内置插件只能停用）；同时清理该插件的未确认告警",
+			InputSchema: schema(map[string]any{"id": id}, "id")},
 
 		{Name: "alerts_list", Description: "查看插件异常告警（未确认优先）",
 			InputSchema: schema(map[string]any{"limit": numProp("返回条数")})},
@@ -367,7 +400,25 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			return fail(err)
 		}
 		if name == "plugin_registry" {
-			return ok(map[string]any{"registry": c.Registry.List(), "permissions": store.AllPermissions})
+			var custom []map[string]any
+			_ = c.Store.View(func(st *store.State) error {
+				for _, p := range st.Plugins {
+					if !p.Custom {
+						continue
+					}
+					custom = append(custom, map[string]any{
+						"id": p.ID, "kind": p.Kind, "name": p.Name, "version": p.Version,
+						"enabled": p.Enabled, "revision": p.Revision,
+					})
+				}
+				return nil
+			})
+			return ok(map[string]any{
+				"registry":      c.Registry.List(),
+				"customPlugins": custom,
+				"permissions":   store.AllPermissions,
+				"note":          "registry 是编译进二进制的内置类型；customPlugins 由 plugin_create 创建，源码可用 plugin_code_upload / plugin_code_patch 即时修改。",
+			})
 		}
 		v, err := c.Plugins.Get(argString(args, "id"))
 		if err != nil {
@@ -545,6 +596,173 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			"unix":           exp.Unix(), "xUserId": sub,
 			"hint": "把 tokenExpiresAt 填入 token_expires_at，把 xUserId 填入 x_user_id。",
 		})
+
+	// ---------- 插件开发：创建 / 源码 / 差量 / 校验 / 导出 / 删除 ----------
+	case "plugin_create":
+		if err := perm(store.PermPluginWrite); err != nil {
+			return fail(err)
+		}
+		spec := plugin.CreateSpec{
+			Kind: argString(args, "kind"), Name: argString(args, "name"),
+			Version: argString(args, "version"), Description: argString(args, "description"),
+			Author: argString(args, "author"), Enabled: argBool(args["enabled"], true),
+		}
+		if _, ok := args["definition"]; ok && args["definition"] != nil {
+			raw, err := definitionFromArgs(args, "definition")
+			if err != nil {
+				return fail(err)
+			}
+			d, err := plugin.ParseDefinition(raw)
+			if err != nil {
+				return fail(err)
+			}
+			spec.Definition = d
+		}
+		if spec.Definition == nil && argString(args, "template") != "" {
+			src, _, err := c.Plugins.SourceJSON(argString(args, "template"))
+			if err != nil {
+				return fail(fmt.Errorf("读取模板 %s: %w", argString(args, "template"), err))
+			}
+			d, err := plugin.ParseDefinition([]byte(src))
+			if err != nil {
+				return fail(err)
+			}
+			spec.Definition = d
+		}
+		if m, ok := args["params"].(map[string]any); ok {
+			spec.Params = anyToStringMap(m)
+		}
+		v, err := c.Plugins.Create(spec, actor)
+		if err != nil {
+			return fail(err)
+		}
+		reload()
+		return ok(map[string]any{
+			"plugin": summary(v), "created": v.ID,
+			"next": "用 plugin_code_upload / plugin_code_patch 完善源码 → plugin_validate → plugin_debug → upload_test 验证 → plugin_toggle 启用",
+		})
+
+	case "plugin_code_get":
+		if err := perm(store.PermPluginRead); err != nil {
+			return fail(err)
+		}
+		id := argString(args, "id")
+		src, editable, err := c.Plugins.SourceJSON(id)
+		if err != nil {
+			return fail(err)
+		}
+		v, err := c.Plugins.Get(id)
+		if err != nil {
+			return fail(err)
+		}
+		var def any
+		_ = json.Unmarshal([]byte(src), &def)
+		note := "源码可编辑：用 plugin_code_upload 全量替换或 plugin_code_patch 差量修改。"
+		if !editable {
+			note = "内置插件由 Go 代码实现，源码只读；可用 plugin_create 的 template 参数派生自定义插件后再改。"
+		}
+		return ok(map[string]any{
+			"id": id, "custom": v.Custom, "editable": editable, "revision": v.Revision,
+			"source": def, "sourceJSON": src, "manifest": v.Manifest, "note": note,
+		})
+
+	case "plugin_code_upload":
+		if err := perm(store.PermPluginWrite); err != nil {
+			return fail(err)
+		}
+		id := argString(args, "id")
+		raw, err := definitionFromArgs(args, "definition")
+		if err != nil {
+			return fail(err)
+		}
+		v, err := c.Plugins.SetDefinition(id, raw, revisionFromArgs(args), actor)
+		if err != nil {
+			return fail(err)
+		}
+		reload()
+		src, _, _ := c.Plugins.SourceJSON(id)
+		return ok(map[string]any{
+			"plugin": summary(v), "sourceJSON": src,
+			"note": "源码已即时编译生效，无需重启服务；可用 plugin_debug / upload_test 验证",
+		})
+
+	case "plugin_code_patch":
+		if err := perm(store.PermPluginWrite); err != nil {
+			return fail(err)
+		}
+		id := argString(args, "id")
+		patch, isMap := args["patch"].(map[string]any)
+		if !isMap {
+			return fail(errors.New("patch 必须是对象"))
+		}
+		v, err := c.Plugins.PatchDefinition(id, patch, revisionFromArgs(args), actor)
+		if err != nil {
+			return fail(err)
+		}
+		reload()
+		src, _, _ := c.Plugins.SourceJSON(id)
+		return ok(map[string]any{
+			"plugin": summary(v), "sourceJSON": src,
+			"note": "仅指定字段被修改，其余源码保持不变；改动已写入 ChangeLog",
+		})
+
+	case "plugin_validate":
+		raw, err := definitionFromArgs(args, "definition")
+		if err != nil {
+			return fail(err)
+		}
+		params := map[string]string{}
+		if m, ok := args["params"].(map[string]any); ok {
+			params = anyToStringMap(m)
+		}
+		result, err := plugin.ValidateDefinition(raw, params)
+		if err != nil {
+			return fail(err)
+		}
+		return ok(result)
+
+	case "plugin_export":
+		if err := perm(store.PermPluginRead); err != nil {
+			return fail(err)
+		}
+		id := argString(args, "id")
+		src, _, err := c.Plugins.SourceJSON(id)
+		if err != nil {
+			return fail(err)
+		}
+		d, err := plugin.ParseDefinition([]byte(src))
+		if err != nil {
+			return fail(err)
+		}
+		format := argString(args, "format")
+		if format == "" {
+			format = "json"
+		}
+		content, filename := src, d.Kind+".plugin.json"
+		if format == "go" {
+			content, err = plugin.ExportGo(d)
+			if err != nil {
+				return fail(err)
+			}
+			filename = strings.ReplaceAll(d.Kind, "-", "") + "/plugin.go"
+		} else if format != "json" {
+			return fail(fmt.Errorf("format 仅支持 json / go，收到 %q", format))
+		}
+		return ok(map[string]any{
+			"id": id, "format": format, "filename": filename, "content": content,
+			"note": "json 可用 plugin_create 的 definition 参数直接导入；go 可放进 internal/plugins/ 内置化",
+		})
+
+	case "plugin_delete":
+		if err := perm(store.PermPluginWrite); err != nil {
+			return fail(err)
+		}
+		id := argString(args, "id")
+		if err := c.Plugins.Delete(id, actor); err != nil {
+			return fail(err)
+		}
+		reload()
+		return ok(map[string]any{"deleted": id, "note": "变更记录已保留，可用 plugin_changes 回溯"})
 
 	// ---------- 告警 ----------
 	case "alerts_list":
@@ -894,8 +1112,35 @@ func summary(v plugin.View) map[string]any {
 		"id": v.ID, "name": v.Name, "version": v.Version, "kind": v.Kind,
 		"enabled": v.Enabled, "status": v.Status, "statusMessage": v.StatusMessage,
 		"revision": v.Revision, "warning": v.Warning, "health": v.Health,
-		"updatedAt": v.UpdatedAt,
+		"custom": v.Custom, "editable": v.Editable, "updatedAt": v.UpdatedAt,
 	}
+}
+
+// definitionFromArgs 同时接受对象与 JSON 字符串，方便 Agent 直接传结构化定义。
+func definitionFromArgs(args map[string]any, key string) ([]byte, error) {
+	v, ok := args[key]
+	if !ok || v == nil {
+		return nil, fmt.Errorf("缺少 %s", key)
+	}
+	switch x := v.(type) {
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil, fmt.Errorf("%s 不能为空", key)
+		}
+		return []byte(x), nil
+	case map[string]any:
+		return json.Marshal(x)
+	default:
+		return nil, fmt.Errorf("%s 必须是对象或 JSON 字符串", key)
+	}
+}
+
+func revisionFromArgs(args map[string]any) *int64 {
+	if v, ok := args["expectedRevision"]; ok && v != nil {
+		n := argIntVal(v)
+		return &n
+	}
+	return nil
 }
 
 func patchFromArgs(args map[string]any) (plugin.Patch, error) {

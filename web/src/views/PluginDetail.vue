@@ -19,6 +19,14 @@ const fullJSON = ref('{\n  "name": "",\n  "enabled": true,\n  "priority": 100,\n
 const updateSpec = ref({ version: '', syncParams: true, resetToDefault: false, note: '' })
 const showManifest = ref(false)
 
+// 插件源码（声明式定义）——与 MCP plugin_code_* 工具同源
+const source = ref(null)
+const sourceText = ref('')
+const sourcePatch = ref('{\n  "request.headers.X-Stage": "v2"\n}')
+const sourceBusy = ref(false)
+const validateResult = ref(null)
+const exportResult = ref(null)
+
 const fields = computed(() => (view.value?.manifest?.params || []))
 const volatileField = computed(() => fields.value.find((f) => f.volatile && f.expiresField))
 const expiryValue = computed(() => form.value[volatileField.value?.expiresField] || '')
@@ -120,9 +128,57 @@ async function applyUpdate() {
   } catch (e) { notifyError(e, '更新失败') }
 }
 
+async function loadSource() {
+  try {
+    const r = await api('/plugins/' + encodeURIComponent(id.value) + '/source')
+    source.value = r
+    sourceText.value = r.sourceJSON || ''
+    validateResult.value = null
+    exportResult.value = null
+  } catch (e) { notifyError(e, '读取插件源码失败') }
+}
+async function validateSource() {
+  sourceBusy.value = true
+  try {
+    validateResult.value = await api('/plugins/validate', { method: 'POST', body: { definition: sourceText.value, params: form.value } })
+    notify(validateResult.value?.valid ? '源码校验通过' : '源码存在问题，请查看下方提示', { type: validateResult.value?.valid ? 'success' : 'error' })
+  } catch (e) { notifyError(e, '校验失败') } finally { sourceBusy.value = false }
+}
+async function saveSource() {
+  sourceBusy.value = true
+  try {
+    await api('/plugins/' + encodeURIComponent(id.value) + '/source', { method: 'PUT', body: { definition: sourceText.value } })
+    notify('插件源码已即时生效，无需重启', { title: 'plugin_code_upload' })
+    await load(); await loadSource()
+  } catch (e) { notifyError(e, '保存源码失败') } finally { sourceBusy.value = false }
+}
+async function patchSource() {
+  sourceBusy.value = true
+  try {
+    await api('/plugins/' + encodeURIComponent(id.value) + '/source', { method: 'PATCH', body: { patch: JSON.parse(sourcePatch.value) } })
+    notify('差量修改已应用', { title: 'plugin_code_patch' })
+    await load(); await loadSource()
+  } catch (e) { notifyError(e, '差量修改失败') } finally { sourceBusy.value = false }
+}
+async function exportSource(format) {
+  try {
+    exportResult.value = await api('/plugins/' + encodeURIComponent(id.value) + '/export?format=' + format)
+    notify('已生成 ' + format.toUpperCase() + ' 导出内容')
+  } catch (e) { notifyError(e, '导出失败') }
+}
+async function deletePlugin() {
+  if (!window.confirm(`确认删除插件「${view.value?.name || id.value}」？该操作不可撤销，变更记录会保留。`)) return
+  try {
+    await api('/plugins/' + encodeURIComponent(id.value), { method: 'DELETE' })
+    notify('自定义插件已删除')
+    go('plugins')
+  } catch (e) { notifyError(e, '删除失败') }
+}
+
 function switchTab(t) {
   tab.value = t
   if (t === 'changes') loadChanges()
+  if (t === 'source') loadSource()
 }
 </script>
 
@@ -153,6 +209,7 @@ function switchTab(t) {
     <div class="tabs">
       <button v-for="t in [
         { k: 'params', l: '参数配置' }, { k: 'debug', l: '调试与检测' },
+        { k: 'source', l: '插件源码' },
         { k: 'advanced', l: '差量 / 全量 / 更新' }, { k: 'changes', l: '变更记录' }, { k: 'docs', l: '插件文档' },
       ]" :key="t.k" class="tab" :class="{ 'is-active': tab === t.k }" @click="switchTab(t.k)">{{ t.l }}</button>
     </div>
@@ -236,6 +293,65 @@ function switchTab(t) {
         </table>
       </div>
       <div v-else class="empty"><div class="empty-title">尚未运行调试</div><p>点击上方按钮，三步诊断插件配置与上游链路。</p></div>
+    </div>
+
+    <!-- 插件源码（声明式定义） -->
+    <div v-else-if="tab === 'source'">
+      <div class="section-head" style="margin-bottom:16px">
+        <div>
+          <h2 class="section-title">声明式插件源码</h2>
+          <p class="section-note">一份 JSON 定义参数 Schema、请求模板与响应映射；保存后立即编译生效、无需重启，与 MCP 的 <code class="code">plugin_code_*</code> 工具完全同源</p>
+        </div>
+        <div class="btn-group">
+          <span class="tag" :class="source?.editable ? 'tag--good' : 'tag--warn'">{{ source?.editable ? '可编辑' : '只读 · 内置插件' }}</span>
+          <span class="tag">revision {{ source?.revision }}</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="field">
+          <label>Plugin Source（JSON）</label>
+          <textarea v-model="sourceText" :readonly="!source?.editable" spellcheck="false" style="min-height:340px;font-family:var(--mono);font-size:12px;line-height:1.6"></textarea>
+          <div class="field-help">
+            模板变量 <code class="code">&#123;&#123;base_url&#125;&#125;</code> 必须在 params 中声明；内置变量：file_name / mime_type / bucket / object_key / file_size / timestamp / unix。
+            响应路径支持点号与数组下标，如 <code class="code">data.fileInfo.fileName</code>。
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+          <button class="btn" :disabled="sourceBusy" @click="validateSource">✓ 静态校验</button>
+          <button class="btn btn--primary" :disabled="sourceBusy || !source?.editable" @click="saveSource">保存源码（全量）</button>
+          <button class="btn" :disabled="sourceBusy" @click="exportSource('json')">导出 JSON</button>
+          <button class="btn" :disabled="sourceBusy" @click="exportSource('go')">导出 Go 源码</button>
+          <button v-if="source?.custom" class="btn btn--danger btn--sm" @click="deletePlugin">删除插件</button>
+        </div>
+      </div>
+
+      <div v-if="source?.editable" class="panel" style="margin-top:18px">
+        <div class="eyebrow">plugin_code_patch</div>
+        <h3 class="section-title">差量修改源码</h3>
+        <p class="section-note">支持点号路径（如 <code class="code">request.headers.Authorization</code>），值为 null 表示删除该字段；params 数组按 key 合并。未涉及的字段保持不变。</p>
+        <div class="field" style="margin-top:16px">
+          <label>Patch JSON</label>
+          <textarea v-model="sourcePatch" style="min-height:110px;font-family:var(--mono);font-size:12px"></textarea>
+        </div>
+        <button class="btn btn--primary btn--sm" style="margin-top:12px" :disabled="sourceBusy" @click="patchSource">应用差量修改</button>
+      </div>
+
+      <div v-if="validateResult" class="panel" style="margin-top:18px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
+          <div class="section-title">校验结果</div>
+          <span class="tag" :class="validateResult.valid ? 'tag--good' : 'tag--accent'">{{ validateResult.valid ? 'PASS' : 'FAIL' }}</span>
+        </div>
+        <p v-if="validateResult.paramsError" class="tiny" style="color:var(--accent)">{{ validateResult.paramsError }}</p>
+        <p v-if="validateResult.missingRequired?.length" class="tiny muted">缺少必填参数：{{ validateResult.missingRequired.join(', ') }}</p>
+        <div class="eyebrow" style="margin:14px 0 8px">请求预览（敏感值已脱敏）</div>
+        <pre class="codeblock"><code>{{ JSON.stringify(validateResult.requestPreview, null, 2) }}</code></pre>
+      </div>
+
+      <div v-if="exportResult" class="panel" style="margin-top:18px">
+        <div class="eyebrow">导出 · {{ exportResult.filename }}</div>
+        <pre class="codeblock" style="margin-top:12px;max-height:360px"><code>{{ exportResult.content }}</code></pre>
+      </div>
     </div>
 
     <!-- 差量 / 全量 / 更新 -->

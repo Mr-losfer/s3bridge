@@ -3,6 +3,9 @@
 > S3Bridge 的核心思路：**一个插件 = 一段把第三方上传接口转换成统一标准输出的适配器**。
 > 新增一家第三方服务时只写插件代码，不改后台、不改前端、不改 MCP——因为配置表单、参数校验、文档和调试能力都由插件清单（`Manifest`）自动生成。
 
+> **两种开发方式，按需选择**：第 2～9 章是编译进二进制的 Go 插件（性能最好、可发布内置版本）；
+> **[第 10 章](#10-通过-mcp-完全掌控插件开发声明式插件源码) 是声明式插件源码 + MCP 全流程**——Agent 用 `plugin_create` / `plugin_code_upload` / `plugin_code_patch` 编写一份 JSON 定义即可创建、改码、校验、调试、上传验证并即时生效，无需重新编译或重启服务。若你的 Agent 需要完全掌控插件开发，直接看第 10 章。
+
 ---
 
 ## 1. 架构与数据流
@@ -344,3 +347,66 @@ x-user-id / x-client-version / x-client-product / x-client-platform / user-agent
 - [ ] 有 `httptest` 单元测试，覆盖成功/失败/超时路径
 - [ ] `go test -race ./...` 通过
 - [ ] 文档（`Docs` 字段）说明了抓包示例与响应映射
+
+---
+
+## 10. 通过 MCP 完全掌控插件开发（声明式插件源码）
+
+前 9 章的 Go 插件需要编译进二进制，Agent 无法在运行时从零创建。为此 S3Bridge 提供**声明式插件源码（Plugin Source）**：一份 JSON 描述参数 Schema、第三方 HTTP 请求模板与响应字段映射，服务端即时编译成 `Uploader`，**改动后无需重启、无需 Go 工具链**。后台的创建/查看/差量修改与 MCP 工具完全同源。
+
+### 10.1 源码结构
+
+| 层级 | 字段 | 说明 |
+| --- | --- | --- |
+| 根 | `kind` / `name` / `version` / `description` / `author` / `docs` | 与 Go 插件的 `Manifest` 等价，`kind` 必须等于插件 ID |
+| 根 | `params` | `ParamField` 数组，驱动后台动态表单、校验与 MCP 参数修改（字段见第 3 章） |
+| `request` | `method` / `url` | 请求方法与地址模板，渲染后必须是 `http(s)://` |
+| `request` | `headers` / `fields` / `fileField` / `rawBody` | 请求头、额外表单字段、文件字段名；值支持 `{{变量}}` |
+| `request` | `mode` | `multipart`（默认）/ `json`（文件转 base64）/ `form` / `raw` |
+| `request` | `checkUrl` / `timeoutSecs` | 可选探活地址（GET）；超时 1～120 秒 |
+| `response` | `codePath` / `successCode` / `messagePath` | 业务码与错误消息路径，如 `code` / `"0"` / `msg` |
+| `response` | `urlPath`（必填）/ `objectKeyPath` | 下载地址与对象键路径 |
+| `response` | `fileNamePath` / `sizePath` / `mimeTypePath` / `expirePath` | 文件信息；缺省时沿用上传请求中的值 |
+| `health` | `enabled` / `intervalSecs` / `timeoutSecs` / `failThreshold` / `probeMode` | 定时检测策略，保存时同步到插件实例 |
+
+模板变量 `{{key}}` 必须先在 `params` 中声明，否则静态校验直接拒绝（避免运行时静默失败）。内置变量无需声明：`file_name`、`mime_type`、`bucket`、`object_key`、`file_size`、`timestamp`、`unix`。
+
+响应路径支持点号与数组下标，例如 `data.fileInfo.fileName`、`data.items[0].url`；JSON 数字用原始精度解析，不会退化成科学计数法。`expirePath` 支持 RFC3339 与 Unix 秒/毫秒。
+
+### 10.2 MCP 全流程（Agent 只需这些工具）
+
+| 步骤 | 工具 | 作用 |
+| --- | --- | --- |
+| 1 参考 | `plugin_code_get`（`id=workbuddy`） | 读取内置插件的等价声明式源码作为模板 |
+| 2 创建 | `plugin_create` | 从零建实例；可附 `definition`，或用 `template` 从内置插件派生；不带定义则生成可运行骨架 |
+| 3 读码 | `plugin_code_get` | 返回 `source`（对象）、`sourceJSON`（规范化文本）、`manifest`、`revision`、`editable` |
+| 4 改码 | `plugin_code_upload` / `plugin_code_patch` | 全量替换 / 字段级差量；均支持 `expectedRevision` 乐观锁 |
+| 5 自检 | `plugin_validate` | 不落库：结构、模板变量、必填参数、脱敏后的请求预览 |
+| 6 配置 | `plugin_params_set` | 填 `base_url` / Token 等，敏感值自动加密 |
+| 7 验证 | `plugin_debug` → `upload_test` | 无副作用调试 → 走新插件真实上传并返回统一标准输出 |
+| 8 交付 | `plugin_export` | `format=json` 可移植定义；`format=go` 生成可内置化的 `plugin.go` |
+| 9 下线 | `plugin_delete` | 删除自定义插件（内置插件只能 `plugin_toggle` 停用） |
+
+`plugin_code_patch` 支持点号路径，例如 `{"request.headers.X-Stage":"v2"}`；值为 `null` 表示删除该字段；`params` 数组按 `key` 做 upsert，元素带 `_delete:true` 表示删除该参数。所有源码写操作都写入 `ChangeLog`（动作 `create` / `code` / `code_patch` / `delete`），可用 `plugin_changes` 回溯。
+
+### 10.3 后台入口
+
+「插件列表」页的 **＋ 创建插件** 可填 ID、名称、版本、说明并选择起始模板；创建后跳到详情页的 **插件源码** 标签，可直接编辑 JSON、静态校验、全量保存、差量修改、导出 JSON / Go 源码，以及删除自定义插件。这与 MCP 调用的是同一组工具，结果一致。
+
+### 10.4 何时用哪种方式
+
+| | 声明式源码 + MCP | Go 插件（第 2 章） |
+| --- | --- | --- |
+| 接入一家标准 HTTP 上传接口 | ✅ 推荐，分钟级 | 可行但需发版 |
+| 需要 SDK、复杂签名、流式转换、自定义协议 | ❌ | ✅ |
+| Agent 运行时自主开发 / 调试 | ✅ | ❌ |
+| 需要随二进制发布、极致性能 | 用 `plugin_export format=go` 内置化 | ✅ |
+
+两种方式共用同一套 `Uploader` 契约与参数 Schema，导出的 Go 文件放进 `internal/plugins/<kind>/plugin.go` 并在 `internal/app/core.go` 注册 `Descriptor()` 即可内置化，行为与动态版本完全一致。
+
+### 10.5 安全边界
+
+- 源码保存前校验：`kind` 格式、参数 key 唯一性与类型、模板变量必须声明、请求方法/模式、超时范围、请求头名称与 CRLF 注入、响应 `urlPath` 必填。
+- 运行时渲染后再次校验目标 URL 只允许 `http/https` 且主机名非空；请求头禁止换行；源码上限 1 MiB、上游响应上限 4 MiB。
+- `Check` 只做 TCP 连通性或可选 `checkUrl` 的 GET 探测，不上传真实文件，符合无副作用探活约定。
+- 源码写操作要求 `plugin:write`，读操作要求 `plugin:read`；内置插件源码只读，避免误改核心实现。
