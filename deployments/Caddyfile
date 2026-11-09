@@ -1,0 +1,16 @@
+# Caddy 反代示例：把 s3.example.com 换成你的域名
+# 在 deployments/docker-compose.yml 中取消 caddy 服务注释后生效。
+s3.example.com {
+    encode gzip
+    request_body {
+        max_size 128MB
+    }
+    reverse_proxy s3bridge:8080 {
+        flush_interval -1
+        header_up X-Forwarded-Proto {scheme}
+    }
+    log {
+        output stdout
+        format console
+    }
+}

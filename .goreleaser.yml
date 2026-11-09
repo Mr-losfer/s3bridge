@@ -1,0 +1,89 @@
+version: 2
+
+project_name: s3bridge
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: s3bridge
+    main: ./cmd/s3bridge
+    binary: s3bridge
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: s3bridge-mcp
+    main: ./cmd/s3bridge-mcp
+    binary: s3bridge-mcp
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: default
+    ids: [s3bridge, s3bridge-mcp]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "s3bridge_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - LICENSE
+      - docs/*.md
+      - deployments/docker-compose.yml
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+  groups:
+    - title: 新功能
+      regexp: '^.*?feat(\([[:word:]]+\))??!?:.+$'
+      order: 0
+    - title: 修复
+      regexp: '^.*?fix(\([[:word:]]+\))??!?:.+$'
+      order: 1
+    - title: 其他
+      order: 999
+
+release:
+  github:
+    owner: Mr-losfer
+    name: s3bridge
+  draft: false
+  prerelease: auto
+  name_template: "S3Bridge {{ .Version }}"
+  footer: |
+    ---
+    **安装**：见 [安装与部署文档](https://github.com/Mr-losfer/s3bridge/blob/main/docs/installation.md)
+    **校验**：`sha256sum -c checksums.txt`

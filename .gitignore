@@ -1,0 +1,24 @@
+# 运行时数据（含密钥、对象、数据库）—— 绝不入库
+data/
+*.log
+.env
+.env.*
+
+# 本地构建产物
+/bin/
+/dist/
+coverage.out
+coverage.html
+*.test
+*.out
+
+# 前端中间产物（构建后的 internal/web/dist 需要提交，故不忽略）
+web/node_modules/
+web/.vite/
+node_modules/
+
+# 编辑器 / 系统
+.DS_Store
+.idea/
+.vscode/
+*.swp

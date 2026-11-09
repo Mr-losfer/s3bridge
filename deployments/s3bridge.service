@@ -1,0 +1,23 @@
+[Unit]
+Description=S3Bridge 插件化上传聚合与 S3 网关
+Documentation=https://github.com/Mr-losfer/s3bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=s3bridge
+Group=s3bridge
+WorkingDirectory=/var/lib/s3bridge
+EnvironmentFile=/etc/s3bridge.env
+ExecStart=/usr/local/bin/s3bridge
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/s3bridge
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,65 @@
+# S3Bridge 生产 Compose 编排
+# 使用：在项目根目录执行
+#   echo "S3BRIDGE_BOOTSTRAP_PASSWORD=$(openssl rand -base64 24)" > .env
+#   docker compose -f deployments/docker-compose.yml up -d
+#
+# 默认使用 GHCR 预构建镜像；如需从源码构建，取消 build 段注释并注释 image 行。
+
+services:
+  s3bridge:
+    image: ghcr.io/mr-losfer/s3bridge:latest
+    # build:
+    #   context: ..
+    #   dockerfile: deployments/Dockerfile
+    #   args:
+    #     VERSION: local
+    container_name: s3bridge
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      S3BRIDGE_ADDR: ":8080"
+      S3BRIDGE_DATA_DIR: /app/data
+      S3BRIDGE_BOOTSTRAP_USER: ${S3BRIDGE_BOOTSTRAP_USER:-admin}
+      S3BRIDGE_BOOTSTRAP_PASSWORD: ${S3BRIDGE_BOOTSTRAP_PASSWORD:?请在 .env 中设置 S3BRIDGE_BOOTSTRAP_PASSWORD}
+      S3BRIDGE_PUBLIC_URL: ${S3BRIDGE_PUBLIC_URL:-http://localhost:8080}
+      S3BRIDGE_MAX_UPLOAD_BYTES: ${S3BRIDGE_MAX_UPLOAD_BYTES:-67108864}
+      S3BRIDGE_LOG_LEVEL: ${S3BRIDGE_LOG_LEVEL:-info}
+      TZ: Asia/Shanghai
+    volumes:
+      - s3bridge-data:/app/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # 可选：Caddy 自动 HTTPS 反代。取消注释并设置好域名后即可启用。
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: s3bridge-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     - s3bridge
+
+volumes:
+  s3bridge-data:
+  # caddy-data:
+  # caddy-config:
