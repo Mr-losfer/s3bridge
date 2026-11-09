@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/store"
@@ -39,10 +40,18 @@ type Service struct {
 	masterKey     []byte
 	sessionSecret []byte
 	ttl           time.Duration
+
+	// touchMu / lastTouch 对 API Key 的「最后使用时间」落盘做节流，
+	// 避免高频 S3 请求每次都全量序列化状态文件。
+	touchMu   sync.Mutex
+	lastTouch map[string]time.Time
 }
 
 func NewService(st store.Store, masterKey, sessionSecret []byte, ttl time.Duration) *Service {
-	return &Service{st: st, masterKey: masterKey, sessionSecret: sessionSecret, ttl: ttl}
+	return &Service{
+		st: st, masterKey: masterKey, sessionSecret: sessionSecret, ttl: ttl,
+		lastTouch: make(map[string]time.Time),
+	}
 }
 
 // Bootstrap 在空库时创建初始管理员与默认 bucket。
@@ -175,6 +184,16 @@ func (s *Service) authenticateAPIKey(token string) (*Principal, error) {
 			}
 			id := k.ID
 			touch = func() {
+				s.touchMu.Lock()
+				if s.lastTouch == nil {
+					s.lastTouch = make(map[string]time.Time)
+				}
+				if !s.lastTouch[id].IsZero() && time.Since(s.lastTouch[id]) < time.Minute {
+					s.touchMu.Unlock()
+					return
+				}
+				s.lastTouch[id] = time.Now()
+				s.touchMu.Unlock()
 				_ = s.st.Update(func(s2 *store.State) error {
 					if kk := store.APIKeyByID(s2, id); kk != nil {
 						now := store.NowUTC()
@@ -190,9 +209,12 @@ func (s *Service) authenticateAPIKey(token string) (*Principal, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 更新最后使用时间放在读锁外，避免锁升级死锁；失败不影响鉴权结果。
+	// 更新最后使用时间放在读锁外，避免锁升级死锁。
+	// 同步执行而非 fire-and-forget goroutine：保证进程退出、测试清理时
+	// 不存在「不可等待、不可取消」的写入，状态文件始终是完整的。
+	// 写操作带节流（同一密钥每分钟最多一次），不会拖慢高频 S3 请求。
 	if touch != nil {
-		go touch()
+		touch()
 	}
 	return p, nil
 }
