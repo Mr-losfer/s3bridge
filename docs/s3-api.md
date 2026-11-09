@@ -22,24 +22,33 @@ S3Bridge 把「各家第三方上传接口」统一暴露成一套 **S3 兼容�
 
 > **多租户隔离的核心**：每个用户在后台创建自己的 API Key，这把密钥同时是 S3 的 `AccessKeyId` / `SecretAccessKey` 与 REST 的 Bearer 令牌。
 
-创建方式：登录后台 →「API 密钥」→「创建密钥」→ 立即保存返回的 `SecretAccessKey`。
+创建方式：登录后台 →「API 密钥」→「创建密钥」。明文**不需要一次性抄录**：随时在列表点「查看」即可取回；「MCP 能力」页顶部也会直接显示当前登录用户的密钥明文与已填好真实凭据的对接代码，一键复制即可。
 
 ```json
 {
   "id": "key_xxx",
   "accessKeyId": "AK_9f2c...",
-  "secretAccessKey": "明文仅显示这一次",
-  "warning": "SecretAccessKey 明文仅显示这一次，请立即保存；之后无法再取出。",
+  "secretAccessKey": "sk_xxx（随时可再次查看）",
+  "note": "SecretAccessKey 已加密保存，可随时用 apikey_reveal 再次取回。",
   "s3": { "endpoint": "/s3", "region": "us-east-1" }
 }
 ```
 
 要点：
 
-- **明文只显示一次**。服务端用 AES-256-GCM 加密存储密文，鉴权时用 SHA-256 摘要比对，日志与持久化文件中都没有明文。
+- **明文可随时查看**。服务端用 AES-256-GCM 加密存储密文，鉴权时用 SHA-256 摘要比对，日志与状态文件中没有明文；登录后的本人或管理员可按需解密查看。
 - 支持设置**有效期**（`expiresInDays`，0 表示永不过期）与**作用域**（`scopes`，留空继承用户全部权限），适合给 CI、第三方应用下发最小权限密钥。
 - 密钥随时可撤销，撤销后该密钥签名的所有 S3 请求立即返回 `AccessDenied`。
 - 用户只能看到/撤销自己的密钥；管理员可见全部。
+
+### 随时取回明文
+
+```http
+GET /api/keys/{id}/secret
+Authorization: Bearer <会话令牌或该用户的 API Key>
+```
+
+返回 `id` / `name` / `userId` / `accessKeyId` / `secretAccessKey` / `scopes` / `revoked` / `region` 等字段；越权返回 `403`，密钥不存在返回 `404`。MCP 对应工具为 `apikey_reveal`，后台「API 密钥」页的「查看」按钮与「MCP 能力」页顶部卡片都走这条通路。
 
 ### 权限映射
 
@@ -109,7 +118,7 @@ S3Bridge 把「各家第三方上传接口」统一暴露成一套 **S3 兼容�
 
 ```bash
 export AWS_ACCESS_KEY_ID=AK_9f2c...
-export AWS_SECRET_ACCESS_KEY=<创建时保存的明文>
+export AWS_SECRET_ACCESS_KEY=<后台随时可查看的明文>
 export AWS_DEFAULT_REGION=us-east-1
 ENDPOINT=http://localhost:8080/s3
 
@@ -132,7 +141,7 @@ s3 = boto3.client(
     endpoint_url="http://localhost:8080/s3",
     region_name="us-east-1",
     aws_access_key_id="AK_9f2c...",
-    aws_secret_access_key="<创建时保存的明文>",
+    aws_secret_access_key="<后台随时可查看的明文>",
     config=Config(s3={"addressing_style": "path"}),
 )
 
@@ -150,7 +159,7 @@ for o in s3.list_objects_v2(Bucket="assets", Prefix="images/").get("Contents", [
 cfg, err := config.LoadDefaultConfig(ctx,
     config.WithRegion("us-east-1"),
     config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-        "AK_9f2c...", "<创建时保存的明文>", "")),
+        "AK_9f2c...", "<后台随时可查看的明文>", "")),
 )
 client := s3.NewFromConfig(cfg, func(o *s3.Options) {
     o.BaseEndpoint = aws.String("http://localhost:8080/s3")
@@ -170,7 +179,7 @@ const s3 = new S3Client({
   forcePathStyle: true,
   credentials: {
     accessKeyId: "AK_9f2c...",
-    secretAccessKey: "<创建时保存的明文>",
+    secretAccessKey: "<后台随时可查看的明文>",
   },
 });
 
@@ -185,7 +194,7 @@ await s3.send(new PutObjectCommand({ Bucket: "assets", Key: "a.txt", Body: "hell
 ```bash
 pip install awscurl
 awscurl --service s3 --region us-east-1 \
-  --access_key AK_9f2c... --secret_key '<明文>' \
+  --access_key AK_9f2c... --secret_key '<后台随时可查看的明文>' \
   http://localhost:8080/s3/
 ```
 

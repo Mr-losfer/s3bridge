@@ -234,7 +234,7 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 
 1. **登录并改密码**：`http://<host>/` → 用 `S3BRIDGE_BOOTSTRAP_USER` / 密码登录 → 「系统设置」→ 修改密码。
 2. **配置插件临时参数**：「插件管理」→ 点击 WorkBuddy → 填入 Bearer Token、`X-User-Id`、Token 过期时间（可用「解析 Token」自动填）→「调试」确认连通 →「检测」恢复健康状态。
-3. **创建 API Key**：「API 密钥」→ 创建 → 立即保存 `SecretAccessKey` → 用 `aws --endpoint-url http://<host>/s3 s3 ls` 验证 S3 接口。
+3. **创建 API Key**：「API 密钥」→ 创建（明文随时可在列表点「查看」取回，无需一次性抄录）→ 用 `aws --endpoint-url http://<host>/s3 s3 ls` 验证 S3 接口；「MCP 能力」页顶部也会直接显示当前账号的密钥明文与已填好的对接代码。
 
 ---
 

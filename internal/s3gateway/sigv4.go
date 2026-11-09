@@ -3,7 +3,7 @@
 // 凭据模型：每个用户在后台创建自己的 API Key，
 //
 //	AccessKeyId     = APIKey.AccessKey
-//	SecretAccessKey = APIKey.Secret（创建时明文仅显示一次，服务端 AES-GCM 加密保存）
+//	SecretAccessKey = APIKey.Secret（服务端 AES-GCM 加密保存，登录后按需解密查看）
 //
 // 因此不同用户天然隔离到各自的 bucket，且可用标准 AWS SDK / aws-cli / s3cmd 直连。
 package s3gateway

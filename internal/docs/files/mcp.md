@@ -57,11 +57,11 @@ curl -s -X POST http://localhost:8080/mcp \
 }
 ```
 
-后台「MCP 能力」页提供**在线调试台**：选择工具 → 自动填充必填参数示例 → 执行 `tools/call` → 查看格式化结果。
+后台「MCP 能力」页顶部直接显示**当前登录用户的 API Key 明文**（Bearer 令牌 / AccessKeyId / SecretAccessKey），以及已经填好真实密钥的 curl、Claude Desktop / Cursor stdio 配置与环境变量代码，可一键复制；没有密钥时可在该页直接创建。页内还提供**在线调试台**：选择工具 → 自动填充必填参数示例 → 执行 `tools/call` → 查看格式化结果。
 
 ---
 
-## 2. 工具清单（37 个）
+## 2. 工具清单（38 个）
 
 ### 站点与系统
 
@@ -125,7 +125,8 @@ curl -s -X POST http://localhost:8080/mcp \
 | `user_create` | 创建用户并指定角色与额外权限 | `username` `password` `displayName` `role` `extraPerms` |
 | `user_update` | 修改角色、权限、显示名、禁用状态 | `id` `role` `extraPerms` `revokedPerms` `displayName` `disabled` |
 | `apikey_list` | 查看 API Key（含 S3 AccessKeyId） | — |
-| `apikey_create` | 创建 API Key，返回**一次性** SecretAccessKey | `name` `userId` `scopes` `expiresInDays` |
+| `apikey_create` | 创建 API Key，返回 SecretAccessKey 明文（之后仍可随时取回） | `name` `userId` `scopes` `expiresInDays` |
+| `apikey_reveal` | 随时查看指定密钥的完整凭据（含明文 / Bearer 令牌），仅本人或管理员可用 | `id` |
 
 ---
 
@@ -234,6 +235,6 @@ curl -s -X POST http://localhost:8080/mcp \
 
 - 所有写操作都要求对应权限；`plugin_debug` 需要 `plugin:debug`，`system_settings_update` 与 `system_update_apply` 需要 `system:manage`，`user_*` 需要 `user:manage`。
 - `system_update_apply` 会替换服务自身的可执行文件，因此额外要求：Release 必须带 `checksums.txt` 且 SHA256 匹配、下载域名在白名单内、服务已启用自重启能力；任一条件不满足都会中止并回滚。
-- 工具返回的敏感参数一律脱敏，SecretAccessKey 明文只在 `apikey_create` 的响应中出现一次。
+- 工具返回的敏感参数一律脱敏；SecretAccessKey 明文只在 `apikey_create` / `apikey_reveal` 与后台「API 密钥」页、「MCP 能力」页顶部出现，且仅密钥本人或管理员登录后可取回。密钥列表始终只返回 `secretHint` 脱敏前缀。
 - 每次变更都会写入 `ChangeLog`，记录 actor（MCP 调用者用户名）、动作与 diff，可在后台或 `plugin_changes` 中回溯。
 - 令牌请通过环境变量传给 stdio 进程，不要写进配置文件并提交仓库。

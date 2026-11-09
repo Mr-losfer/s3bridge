@@ -72,8 +72,8 @@ docker run -d --name s3bridge \
 | 上传测试 | 拖拽上传、进度、统一标准输出与签名到期时间 |
 | 上传列表 | 按 bucket / 类型 / 插件 / 关键字筛选，图片预览、下载、复制 `s3://` URI、删除 |
 | 存储桶 | 桶管理 + S3 接入示例 |
-| API 密钥 | 创建（一次性明文）、作用域、有效期、撤销、S3 接入点 |
-| MCP 能力 | 工具清单、**在线调试台**、Claude Desktop / Cursor 接入配置 |
+| API 密钥 | 创建、随时查看明文、作用域、有效期、撤销、S3 接入点 |
+| MCP 能力 | **当前用户 API Key 明文 + 现成对接代码**、工具清单、在线调试台、Claude Desktop / Cursor 接入配置 |
 | 文档中心 | 四份文档在线渲染 |
 | 用户与权限 | 用户管理、角色默认权限、权限矩阵（额外授予 / 撤销） |
 | 系统设置 | 站点名、默认插件、健康检测总开关、告警开关、公告、修改密码 |
@@ -209,7 +209,7 @@ make docker       # 构建镜像
 - `go test -race ./...` 竞态检测；调度器 goroutine 均满足「可取消、可等待、有所有者」
 - CI：gofmt / vet / test -race / coverage / 前端构建 / 文档同步 / govulncheck / 冒烟启动
 - Release：GoReleaser 构建 5 个平台压缩包 + checksums，Actions 推送 linux/amd64 + linux/arm64 多架构镜像到 GHCR
-- 安全：密码 bcrypt、敏感参数 AES-256-GCM、API Key 明文只显示一次、对象键路径穿越清洗、登录限流、SigV4 常量时间比较
+- 安全：密码 bcrypt、敏感参数与 API Key 明文 AES-256-GCM 加密存储（登录后仅本人/管理员按需解密查看）、对象键路径穿越清洗、登录限流、SigV4 常量时间比较
 
 ---
 

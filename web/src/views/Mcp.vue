@@ -1,8 +1,9 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { api, mcpRPC } from '../api'
 import { notify, notifyError } from '../toast'
 import { go } from '../router'
+import { session } from '../session'
 
 const tools = ref([])
 const resources = ref([])
@@ -14,6 +15,14 @@ const running = ref(false)
 const output = ref('')
 const outputIsError = ref(false)
 const copied = ref('')
+
+// 当前登录用户的 API Key：列表 + 按需解密后的完整凭据
+const myKeys = ref([])
+const selectedKeyId = ref('')
+const keyDetail = ref(null)
+const keyLoading = ref(false)
+const creatingKey = ref(false)
+const showKey = ref(true)
 
 const groups = computed(() => {
   const defs = [
@@ -34,6 +43,10 @@ const groups = computed(() => {
 })
 
 const currentTool = computed(() => tools.value.find((t) => t.name === selectedTool.value))
+const activeToken = computed(() => keyDetail.value?.secretAccessKey || '<请先创建 API Key>')
+const activeAccess = computed(() => keyDetail.value?.accessKeyId || '<AccessKeyId>')
+// 隐藏明文时，示例代码中的凭据也一并遮蔽，避免屏幕上仍能看到密钥。
+const visibleToken = computed(() => showKey.value ? activeToken.value : '<已隐藏，点「显示明文」查看>')
 
 async function load() {
   loading.value = true
@@ -49,6 +62,44 @@ async function load() {
   finally { loading.value = false }
 }
 onMounted(load)
+
+// 会话就绪后再拉取当前用户密钥；登录状态变化时自动刷新，避免显示他人凭据。
+watch(() => session.user?.id, (id) => { if (id) loadKeys() }, { immediate: true })
+
+async function loadKeys() {
+  keyLoading.value = true
+  try {
+    const list = await api('/keys')
+    myKeys.value = (list || []).filter((k) => k.userId === session.user?.id && !k.revoked)
+    if (!myKeys.value.some((k) => k.id === selectedKeyId.value)) {
+      selectedKeyId.value = myKeys.value[0]?.id || ''
+    }
+    keyDetail.value = selectedKeyId.value
+      ? await api('/keys/' + encodeURIComponent(selectedKeyId.value) + '/secret')
+      : null
+  } catch (e) { notifyError(e, '加载当前用户 API Key 失败') }
+  finally { keyLoading.value = false }
+}
+
+async function selectKey() {
+  if (!selectedKeyId.value) { keyDetail.value = null; return }
+  try { keyDetail.value = await api('/keys/' + encodeURIComponent(selectedKeyId.value) + '/secret') }
+  catch (e) { notifyError(e, '查看密钥失败') }
+}
+
+async function createKey() {
+  creatingKey.value = true
+  try {
+    const r = await api('/keys', {
+      method: 'POST',
+      body: { name: 'mcp-' + new Date().toISOString().slice(0, 10), scopes: [] },
+    })
+    selectedKeyId.value = r?.id || ''
+    notify('API Key 已创建，下方代码已自动填入')
+    await loadKeys()
+  } catch (e) { notifyError(e, '创建密钥失败') }
+  finally { creatingKey.value = false }
+}
 
 function choose(name) {
   selectedTool.value = name
@@ -96,6 +147,11 @@ function jumpToTool(name) {
 }
 
 function copy(text, label) {
+  // 隐藏明文时禁止复制真实凭据，避免「屏幕看不到但剪贴板是明文」的错觉。
+  if (!showKey.value && label.startsWith('mcp-')) {
+    notifyError(new Error('请先点「显示明文」再复制'))
+    return
+  }
   copied.value = label
   navigator.clipboard?.writeText(text).then(
     () => notify(label + ' 已复制到剪贴板'),
@@ -104,9 +160,18 @@ function copy(text, label) {
   setTimeout(() => { copied.value = '' }, 1400)
 }
 
+const envExample = computed(() => `# S3Bridge MCP / REST / S3 接入（已填入当前登录用户的真实密钥）
+export S3BRIDGE_URL=${window.location.origin}
+export S3BRIDGE_TOKEN=${visibleToken.value}
+
+# S3 标准接口（AWS SigV4）
+export AWS_ACCESS_KEY_ID=${activeAccess.value}
+export AWS_SECRET_ACCESS_KEY=${visibleToken.value}
+aws --endpoint-url ${window.location.origin}/s3 s3 ls`)
+
 const httpExample = computed(() => `curl -s -X POST ${window.location.origin}/mcp \\
   -H "Content-Type: application/json" \\
-  -H "Authorization: Bearer <你的登录令牌或 API Key>" \\
+  -H "Authorization: Bearer ${visibleToken.value}" \\
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"site_info","arguments":{}}}'`)
 
 const desktopConfig = computed(() => `{
@@ -115,7 +180,7 @@ const desktopConfig = computed(() => `{
       "command": "s3bridge-mcp",
       "env": {
         "S3BRIDGE_URL": "${window.location.origin}",
-        "S3BRIDGE_TOKEN": "<你的登录令牌或 API Key>"
+        "S3BRIDGE_TOKEN": "${visibleToken.value}"
       }
     }
   }
@@ -133,6 +198,64 @@ const desktopConfig = computed(() => `{
       <div class="btn-group">
         <button class="btn" @click="load">↻ 刷新</button>
         <button class="btn" @click="go('docs', 'mcp')">完整文档 →</button>
+      </div>
+    </div>
+
+    <!-- 当前登录用户的 API Key：明文 + 已填好真实凭据的对接代码 -->
+    <div class="section">
+      <div class="section-head">
+        <div>
+          <h2 class="section-title">当前登录用户的 API Key</h2>
+          <p class="section-note">下方代码已自动填入 <strong>{{ session.user?.displayName || session.user?.username || '当前账号' }}</strong> 的真实密钥，复制即可使用；无需另找地方生成，随时可回来查看。</p>
+        </div>
+        <div class="btn-group">
+          <button class="btn btn--sm" :disabled="keyLoading" @click="loadKeys">↻ 刷新密钥</button>
+          <button class="btn btn--sm" @click="go('keys')">管理密钥 →</button>
+        </div>
+      </div>
+      <div class="panel" style="margin-top:18px">
+        <div v-if="keyDetail">
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px">
+            <span class="tag tag--good">归属：{{ session.user?.username }}</span>
+            <select v-model="selectedKeyId" style="max-width:280px" @change="selectKey">
+              <option v-for="k in myKeys" :key="k.id" :value="k.id">{{ k.name }} · {{ k.id }}</option>
+            </select>
+            <span class="status" :class="keyDetail.revoked ? 'status--disabled' : 'status--healthy'">{{ keyDetail.revoked ? '已撤销' : '有效' }}</span>
+            <button class="btn btn--quiet btn--sm" @click="showKey = !showKey">{{ showKey ? '隐藏明文' : '显示明文' }}</button>
+            <button class="btn btn--sm" :disabled="creatingKey" @click="createKey">＋ 新建密钥</button>
+            <span v-if="keyLoading" class="spinner"></span>
+          </div>
+          <dl class="kv" style="grid-template-columns:175px 1fr">
+            <dt>API Key / Bearer</dt>
+            <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>{{ showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••' }}</span>
+              <button class="btn btn--sm" @click="copy(keyDetail.secretAccessKey, 'mcp-token')">{{ copied === 'mcp-token' ? '已复制' : '复制' }}</button>
+            </dd>
+            <dt>AccessKeyId</dt>
+            <dd class="mono" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>{{ keyDetail.accessKeyId }}</span>
+              <button class="btn btn--sm" @click="copy(keyDetail.accessKeyId, 'mcp-access')">{{ copied === 'mcp-access' ? '已复制' : '复制' }}</button>
+            </dd>
+            <dt>SecretAccessKey</dt>
+            <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>{{ showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••' }}</span>
+              <button class="btn btn--sm" @click="copy(keyDetail.secretAccessKey, 'mcp-secret')">{{ copied === 'mcp-secret' ? '已复制' : '复制' }}</button>
+            </dd>
+          </dl>
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:22px 0 10px">
+            <div class="eyebrow">一键接入代码（已填入真实密钥）</div>
+            <button class="btn btn--sm" @click="copy(envExample, 'mcp-env')">{{ copied === 'mcp-env' ? '已复制' : '复制全部' }}</button>
+          </div>
+          <pre class="codeblock"><code>{{ envExample }}</code></pre>
+          <p class="tiny muted" style="margin:12px 0 0">明文由服务端 AES-256-GCM 加密保存，仅本人或管理员登录后按需解密；下方 HTTP / stdio 示例也已自动替换为这把密钥。</p>
+        </div>
+        <div v-else class="empty">
+          <div class="empty-title">当前账号还没有 API Key</div>
+          <p>点一下即可创建，随后这里会直接显示明文与现成的 MCP 对接代码。</p>
+          <button class="btn btn--primary btn--sm" :disabled="creatingKey || keyLoading" @click="createKey">
+            {{ creatingKey ? '创建中…' : '立即创建 API Key' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -206,7 +329,7 @@ const desktopConfig = computed(() => `{
 
     <!-- 接入配置 -->
     <div class="section">
-      <div class="section-head"><div><h2 class="section-title">接入配置</h2><p class="section-note">HTTP 直连或 stdio 独立进程，二选一</p></div></div>
+      <div class="section-head"><div><h2 class="section-title">接入配置</h2><p class="section-note">HTTP 直连或 stdio 独立进程，二选一 · 代码中的密钥已按上方选中的密钥自动填写</p></div></div>
       <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;margin-top:18px">
         <div>
           <div class="eyebrow" style="margin-bottom:10px">HTTP / Streamable HTTP</div>
@@ -223,7 +346,7 @@ const desktopConfig = computed(() => `{
           <span v-for="r in resources" :key="r.uri" class="tag" :title="r.description">{{ r.uri }}</span>
           <span v-if="!resources.length" class="muted tiny">暂无资源</span>
         </div>
-        <p class="tiny muted" style="margin:12px 0 0">工具需要鉴权：HTTP 端点使用 <code class="code">Authorization: Bearer &lt;登录令牌或 API Key&gt;</code>，stdio 模式通过 <code class="code">S3BRIDGE_TOKEN</code> 环境变量传入。令牌可在「API 密钥」页面创建。</p>
+        <p class="tiny muted" style="margin:12px 0 0">工具需要鉴权：HTTP 端点使用 <code class="code">Authorization: Bearer &lt;API Key&gt;</code>，stdio 模式通过 <code class="code">S3BRIDGE_TOKEN</code> 环境变量传入。当前账号的密钥明文与可复制代码就在本页顶部，也可在「API 密钥」页面随时查看或新建。</p>
       </div>
     </div>
   </div>

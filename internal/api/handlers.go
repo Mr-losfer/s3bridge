@@ -323,6 +323,41 @@ func (s *Server) keyCreate(c *Ctx) error {
 	return s.namedTool("apikey_create")(c)
 }
 
+// keyReveal 随时取出指定 API Key 的完整凭据（含 SecretAccessKey 明文）。
+// 明文以 AES-256-GCM 加密落盘，这里按需解密；仅密钥本人或管理员可读取，
+// 避免「创建时没存住就只能重建密钥」的体验问题，同时不扩大越权面。
+func (s *Server) keyReveal(c *Ctx) error {
+	id := c.Param("id")
+	var out map[string]any
+	err := s.core.Store.View(func(st *store.State) error {
+		k := store.APIKeyByID(st, id)
+		if k == nil {
+			return errf(http.StatusNotFound, "not_found", "密钥不存在")
+		}
+		if !c.IsAdmin() && k.UserID != c.UserID() {
+			return errf(http.StatusForbidden, "forbidden", "无权查看他人密钥")
+		}
+		secret, err := s.core.Auth.Secret(k)
+		if err != nil {
+			return fmt.Errorf("解密密钥: %w", err)
+		}
+		out = map[string]any{
+			"id": k.ID, "name": k.Name, "userId": k.UserID,
+			"accessKeyId": k.AccessKey, "secretAccessKey": secret,
+			"secretHint": k.SecretHint, "scopes": k.Scopes,
+			"revoked": k.Revoked, "expiresAt": k.ExpiresAt,
+			"createdAt": k.CreatedAt, "lastUsedAt": k.LastUsedAt,
+			"endpoint": "/s3", "region": s.core.S3.Region(),
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	c.JSON(http.StatusOK, out)
+	return nil
+}
+
 func (s *Server) keyRevoke(c *Ctx) error {
 	id := c.Param("id")
 	if err := s.core.Store.Update(func(st *store.State) error {
@@ -361,7 +396,7 @@ func (s *Server) s3Credentials(c *Ctx) error {
 		"endpoint": "/s3", "region": s.core.S3.Region(),
 		"accessKeys":  keys,
 		"example":     fmt.Sprintf("aws --endpoint-url %s/s3 s3 ls", publicURL(c, s.core.Cfg.PublicBaseURL)),
-		"note":        "SecretAccessKey 明文只在创建时显示一次；请到「API 密钥」页面创建新密钥。",
+		"note":        "SecretAccessKey 可随时在「API 密钥」页面点「查看」获取，也可在「MCP 能力」页面直接复制现成的对接代码。",
 		"generatedAt": time.Now().UTC().Format(time.RFC3339),
 	})
 	return nil

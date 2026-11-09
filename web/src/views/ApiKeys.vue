@@ -14,6 +14,9 @@ const drawer = ref(false)
 const saving = ref(false)
 const busy = ref('')
 const created = ref(null)
+const revealed = ref(null)
+const revealBusy = ref('')
+const showSecret = ref(true)
 const form = ref({ name: '', expiresInDays: 0, scopes: [] })
 const copied = ref('')
 
@@ -57,9 +60,19 @@ async function create() {
     })
     created.value = r
     drawer.value = false
-    notify('密钥已创建，请立即保存 SecretAccessKey', { title: '仅显示一次' })
+    notify('密钥已创建，之后随时可点「查看」再次获取明文')
     await load()
   } catch (e) { notifyError(e, '创建失败') } finally { saving.value = false }
+}
+
+// 明文由服务端按需解密返回，任何时间都能重新查看，不需要一次性抄录。
+async function reveal(k) {
+  revealBusy.value = k.id
+  try {
+    revealed.value = await api('/keys/' + encodeURIComponent(k.id) + '/secret')
+    showSecret.value = true
+  } catch (e) { notifyError(e, '查看密钥失败') }
+  finally { revealBusy.value = '' }
 }
 
 async function revoke(k) {
@@ -68,6 +81,7 @@ async function revoke(k) {
   try {
     await api('/keys/' + encodeURIComponent(k.id), { method: 'DELETE' })
     notify(`密钥 ${k.name} 已撤销`)
+    if (revealed.value?.id === k.id) revealed.value = null
     await load()
   } catch (e) { notifyError(e, '撤销失败') } finally { busy.value = '' }
 }
@@ -84,6 +98,18 @@ function copy(text, label) {
 const awsEnv = computed(() => `export AWS_ACCESS_KEY_ID=${created.value?.accessKeyId || '<AccessKeyId>'}
 export AWS_SECRET_ACCESS_KEY=${created.value?.secretAccessKey || '<SecretAccessKey>'}
 aws --endpoint-url ${fullEndpoint.value} s3 ls`)
+
+const revealCode = computed(() => {
+  const r = revealed.value
+  if (!r) return ''
+  return `# REST / MCP：同一把密钥直接作为 Bearer Token
+curl -s -H "Authorization: Bearer ${r.secretAccessKey}" ${window.location.origin}/api/me
+
+# S3 标准接口（AWS SigV4）
+export AWS_ACCESS_KEY_ID=${r.accessKeyId}
+export AWS_SECRET_ACCESS_KEY=${r.secretAccessKey}
+aws --endpoint-url ${fullEndpoint.value} s3 ls`
+})
 </script>
 
 <template>
@@ -92,7 +118,7 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
       <div>
         <div class="eyebrow">Credentials / API 密钥</div>
         <h1 class="page-title">API 密钥与 S3 凭据</h1>
-        <p class="page-desc">同一把密钥既可作为 REST <code class="code">Bearer</code> 令牌，也可作为 S3 SigV4 的 AccessKeyId / SecretAccessKey。每个用户只看到自己的密钥。</p>
+        <p class="page-desc">同一把密钥既可作为 REST <code class="code">Bearer</code> 令牌，也可作为 S3 SigV4 的 AccessKeyId / SecretAccessKey。每个用户只看到自己的密钥，且随时可重新查看明文。</p>
       </div>
       <div class="btn-group">
         <button class="btn" @click="load">↻ 刷新</button>
@@ -101,12 +127,12 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
       </div>
     </div>
 
-    <!-- 一次性明文 -->
+    <!-- 创建结果 -->
     <div v-if="created" class="alert-strip" style="display:block;border-left-width:3px;margin-bottom:22px">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
         <div>
-          <div class="alert-strip-title">⚠ SecretAccessKey 仅显示这一次，请立即保存</div>
-          <div class="alert-strip-body">关闭此提示后无法再次取出明文，只能重新创建密钥。</div>
+          <div class="alert-strip-title">✓ 密钥已创建</div>
+          <div class="alert-strip-body">明文已加密保存，无需一次性抄录。关闭后随时可在下方列表点「查看」再次获取，也可在「MCP 能力」页面直接复制现成的对接代码。</div>
         </div>
         <button class="icon-btn" @click="created = null">✕</button>
       </div>
@@ -119,7 +145,7 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
       <pre class="codeblock" style="margin-top:16px"><code>{{ awsEnv }}</code></pre>
       <div style="display:flex;gap:8px;margin-top:14px">
         <button class="btn btn--sm" @click="copy(awsEnv, '环境变量')">复制环境变量</button>
-        <button class="btn btn--quiet btn--sm" @click="created = null">我已保存，关闭</button>
+        <button class="btn btn--quiet btn--sm" @click="created = null">关闭</button>
       </div>
     </div>
 
@@ -138,7 +164,7 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
 
     <div class="section">
       <div class="section-head">
-        <div><h2 class="section-title">密钥列表</h2><p class="section-note">共 {{ keys.length }} 把 · 作用域留空表示继承用户全部权限</p></div>
+        <div><h2 class="section-title">密钥列表</h2><p class="section-note">共 {{ keys.length }} 把 · 作用域留空表示继承用户全部权限 · 点「查看」随时取回明文</p></div>
       </div>
       <div class="table-wrap" style="margin-top:18px">
         <table>
@@ -162,18 +188,70 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
               <td class="muted tiny nowrap">{{ fmtTime(k.createdAt) }}<div class="cell-sub">{{ k.lastUsedAt ? relTime(k.lastUsedAt) : '从未使用' }}</div></td>
               <td>
                 <div class="row-actions">
+                  <button class="btn btn--sm" :disabled="revealBusy === k.id" @click="reveal(k)">{{ revealBusy === k.id ? '…' : '查看' }}</button>
                   <button class="btn btn--quiet btn--sm" @click="copy(k.accessKey, 'AccessKeyId')">{{ copied === 'AccessKeyId' ? '已复制' : '复制' }}</button>
                   <button v-if="!k.revoked" class="btn btn--quiet btn--sm" :disabled="busy === k.id" @click="revoke(k)">撤销</button>
                 </div>
               </td>
             </tr>
-            <tr v-if="!keys.length && !loading"><td colspan="7"><div class="empty"><div class="empty-title">还没有密钥</div><p>创建一把密钥即可用标准 S3 客户端接入。</p><button class="btn btn--primary btn--sm" @click="openCreate">创建密钥</button></div></td></tr>
+            <tr v-if="!keys.length && !loading"><td colspan="7"><div class="empty"><div class="empty-title">还没有密钥</div><p>创建一把密钥即可用标准 S3 客户端接入，之后随时可回来查看明文。</p><button class="btn btn--primary btn--sm" @click="openCreate">创建密钥</button></div></td></tr>
             <tr v-if="loading"><td colspan="7"><div class="empty"><span class="spinner"></span> 正在加载…</div></td></tr>
           </tbody>
         </table>
       </div>
-      <p class="tiny muted" style="margin-top:12px">SecretAccessKey 在服务端以 AES-256-GCM 加密存储，鉴权使用 SHA-256 摘要比对；明文不会写入日志或持久化文件。</p>
+      <p class="tiny muted" style="margin-top:12px">SecretAccessKey 在服务端以 AES-256-GCM 加密存储，鉴权使用 SHA-256 摘要比对；明文不写入日志与状态文件，仅登录后的本人或管理员可按需解密查看。</p>
     </div>
+
+    <!-- 查看凭据弹窗 -->
+    <template v-if="revealed">
+      <div class="modal-backdrop" @click.self="revealed = null">
+        <div class="modal" role="dialog" aria-modal="true" aria-label="查看密钥凭据">
+          <div class="modal-head">
+            <div>
+              <div class="eyebrow" style="margin-bottom:7px">Credential / 凭据详情</div>
+              <h2 class="modal-title">{{ revealed.name || '未命名密钥' }}</h2>
+              <p class="modal-sub">{{ revealed.id }} · {{ revealed.revoked ? '已撤销' : '有效' }} · 创建于 {{ fmtTime(revealed.createdAt) }}</p>
+            </div>
+            <button class="modal-close" title="关闭" @click="revealed = null">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="alert-strip" style="margin-bottom:18px">
+              <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">!</div>
+              <div class="alert-strip-body">这把密钥同时用于 REST / MCP 的 Bearer 鉴权与 S3 SigV4 签名。明文可随时再来查看，请勿提交到公开仓库或聊天记录。</div>
+            </div>
+            <dl class="kv" style="grid-template-columns:170px 1fr">
+              <dt>API Key / Bearer</dt>
+              <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                {{ showSecret ? revealed.secretAccessKey : '••••••••••••••••••••••••' }}
+                <button class="btn btn--quiet btn--sm" @click="showSecret = !showSecret">{{ showSecret ? '隐藏' : '显示' }}</button>
+                <button class="btn btn--sm" @click="copy(revealed.secretAccessKey, 'reveal-bearer')">{{ copied === 'reveal-bearer' ? '已复制' : '复制' }}</button>
+              </dd>
+              <dt>AccessKeyId</dt>
+              <dd class="mono" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                {{ revealed.accessKeyId }}
+                <button class="btn btn--sm" @click="copy(revealed.accessKeyId, 'reveal-access')">{{ copied === 'reveal-access' ? '已复制' : '复制' }}</button>
+              </dd>
+              <dt>SecretAccessKey</dt>
+              <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+                {{ showSecret ? revealed.secretAccessKey : '••••••••••••••••••••••••' }}
+                <button class="btn btn--sm" @click="copy(revealed.secretAccessKey, 'reveal-secret')">{{ copied === 'reveal-secret' ? '已复制' : '复制' }}</button>
+              </dd>
+              <dt>Endpoint / Region</dt>
+              <dd class="mono tiny">{{ fullEndpoint }} · {{ revealed.region || region }}</dd>
+              <dt>状态 / 作用域</dt>
+              <dd class="tiny">{{ revealed.revoked ? '已撤销' : '有效' }} · {{ (revealed.scopes || []).length ? revealed.scopes.join(', ') : '继承用户全部权限' }}<span v-if="revealed.expiresAt"> · 到期 {{ fmtTime(revealed.expiresAt) }}</span></dd>
+            </dl>
+            <div class="eyebrow" style="margin:22px 0 10px">可直接复制的对接代码</div>
+            <pre class="codeblock"><code>{{ revealCode }}</code></pre>
+          </div>
+          <div class="modal-foot">
+            <button class="btn btn--quiet btn--sm" @click="copy(revealCode, 'reveal-code')">{{ copied === 'reveal-code' ? '已复制' : '复制对接代码' }}</button>
+            <button class="btn" @click="go('mcp')">MCP 接入示例 →</button>
+            <button class="btn btn--primary" @click="revealed = null">关闭</button>
+          </div>
+        </div>
+      </div>
+    </template>
 
     <!-- 创建抽屉 -->
     <template v-if="drawer">
@@ -212,8 +290,8 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`)
           </div>
           <div class="divider"></div>
           <div class="alert-strip" style="margin:0">
-            <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">!</div>
-            <div class="alert-strip-body">创建成功后 SecretAccessKey 明文只展示一次。请保存到密码管理器，之后无法找回。</div>
+            <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">i</div>
+            <div class="alert-strip-body">创建后可在密钥列表随时点「查看」获取明文，不需要一次性保存；仅本人与管理员登录后可见。</div>
           </div>
         </div>
         <div class="drawer-foot">

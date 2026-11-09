@@ -166,11 +166,15 @@ func (s *Server) Tools() []Tool {
 			}, "id")},
 		{Name: "apikey_list", Description: "查看 API Key（含 AccessKeyId，用于 S3 SigV4）",
 			InputSchema: schema(map[string]any{})},
-		{Name: "apikey_create", Description: "创建 API Key；返回的 SecretAccessKey 明文只显示这一次，请立即保存",
+		{Name: "apikey_create", Description: "创建 API Key；返回 SecretAccessKey 明文，之后也可随时用 apikey_reveal 再取回",
 			InputSchema: schema(map[string]any{
 				"name": strProp("密钥名称"), "userId": strProp("所属用户 ID，管理员可指定"),
 				"scopes": arrProp("权限范围，留空继承用户全部权限"), "expiresInDays": numProp("有效期天数，0 表示永不过期"),
 			}, "name")},
+		{Name: "apikey_reveal", Description: "随时查看指定 API Key 的完整凭据（AccessKeyId + SecretAccessKey 明文 / REST Bearer 令牌），仅本人或管理员可用",
+			InputSchema: schema(map[string]any{
+				"id": strProp("密钥 ID，可由 apikey_list 获取"),
+			}, "id")},
 	}
 }
 
@@ -841,9 +845,42 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 		return ok(map[string]any{
 			"id": key.ID, "accessKeyId": key.AccessKey,
 			"secretAccessKey": secret,
-			"warning":         "SecretAccessKey 明文仅显示这一次，请立即保存；之后无法再取出。",
+			"note":            "SecretAccessKey 已加密保存，可随时用 apikey_reveal 再次取回。",
 			"s3":              map[string]any{"endpoint": "/s3", "region": c.S3.Region()},
 		})
+
+	case "apikey_reveal":
+		id := argString(args, "id")
+		if id == "" {
+			return fail(errors.New("缺少 id"))
+		}
+		var out map[string]any
+		err := c.Store.View(func(st *store.State) error {
+			k := store.APIKeyByID(st, id)
+			if k == nil {
+				return errors.New("密钥不存在")
+			}
+			if p != nil && !p.IsAdmin() && k.UserID != p.UserID {
+				return errors.New("无权查看他人密钥")
+			}
+			secret, err := c.Auth.Secret(k)
+			if err != nil {
+				return fmt.Errorf("解密密钥: %w", err)
+			}
+			out = map[string]any{
+				"id": k.ID, "name": k.Name, "userId": k.UserID,
+				"accessKeyId": k.AccessKey, "secretAccessKey": secret,
+				"bearerToken": secret, "scopes": k.Scopes,
+				"revoked": k.Revoked, "expiresAt": k.ExpiresAt,
+				"createdAt": k.CreatedAt, "lastUsedAt": k.LastUsedAt,
+				"endpoint": "/s3", "region": c.S3.Region(),
+			}
+			return nil
+		})
+		if err != nil {
+			return fail(err)
+		}
+		return ok(out)
 
 	default:
 		return jsonPretty(map[string]any{"error": "未知工具: " + name, "hint": "调用 tools/list 查看可用工具"}), true

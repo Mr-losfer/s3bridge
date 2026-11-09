@@ -97,6 +97,7 @@ func (s *Server) routes() {
 	// API Key / S3 凭据
 	r.Handle("GET", "/api/keys", s.namedTool("apikey_list"))
 	r.Handle("POST", "/api/keys", s.keyCreate)
+	r.Handle("GET", "/api/keys/{id}/secret", s.keyReveal)
 	r.Handle("DELETE", "/api/keys/{id}", s.keyRevoke)
 	r.Handle("GET", "/api/s3/credentials", s.s3Credentials)
 
