@@ -23,6 +23,8 @@ type CreateSpec struct {
 	Definition  *Definition // 为空时生成可直接运行的骨架定义
 	Params      map[string]string
 	Enabled     bool
+	Priority    *int     // 调度权重，留空默认 100
+	FileTypes   []string // 可承接的文件类型，留空表示全部
 }
 
 // ValidateKind 校验自定义插件的类型标识。
@@ -103,6 +105,20 @@ func (m *Manager) Create(spec CreateSpec, actor string) (View, error) {
 	if err != nil {
 		return View{}, err
 	}
+	priority := 100
+	if spec.Priority != nil {
+		priority = *spec.Priority
+	}
+	types, err := ParseFileTypes(spec.FileTypes)
+	if err != nil {
+		return View{}, err
+	}
+	if spec.FileTypes == nil && len(def.FileTypes) > 0 {
+		types, err = ParseFileTypes(def.FileTypes)
+		if err != nil {
+			return View{}, err
+		}
+	}
 	// 新建插件时必填参数尚未配置（随后用 plugin_params_set 补齐），
 	// 因此这里不做全量必填校验，参数正确性由 plugin_debug / 真实上传时收口。
 
@@ -117,7 +133,7 @@ func (m *Manager) Create(spec CreateSpec, actor string) (View, error) {
 		st.Plugins = append(st.Plugins, store.Plugin{
 			ID: kind, Kind: kind, Name: def.Name, Description: def.Description,
 			Version: def.Version, Author: def.Author,
-			Enabled: spec.Enabled, Priority: 100, Params: sealed,
+			Enabled: spec.Enabled, Priority: priority, FileTypes: types, Params: sealed,
 			Status: store.StatusUnknown, StatusMessage: "新插件已创建，等待健康检测",
 			Health: healthConfig(def.Health), Revision: 1,
 			Definition: string(canonical), Custom: true,
@@ -221,6 +237,10 @@ func (m *Manager) applyDefinition(id string, raw []byte, expected *int64, actor,
 		return View{}, err
 	}
 	mf := d.ToManifest()
+	types, err := ParseFileTypes(d.FileTypes)
+	if err != nil {
+		return View{}, err
+	}
 	err = m.st.Update(func(st *store.State) error {
 		p := store.PluginByID(st, id)
 		if p == nil {
@@ -237,6 +257,7 @@ func (m *Manager) applyDefinition(id string, raw []byte, expected *int64, actor,
 		p.Version = d.Version
 		p.Description = d.Description
 		p.Author = d.Author
+		p.FileTypes = types
 		p.Health = healthConfig(d.Health)
 		if p.Params == nil {
 			p.Params = map[string]string{}

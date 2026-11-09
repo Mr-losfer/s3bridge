@@ -271,6 +271,8 @@ WorkBuddy 插件就是完整范例：`authorization`（Bearer Token）+ `token_e
 | 差量修改 | 插件详情「保存」 | `plugin_patch` | 只更新传入字段，`params` **按键合并**，未传字段保持不变；支持 `expectedRevision` 乐观锁防并发覆盖 |
 | 全量修改 | 插件详情「重置为完整配置」 | `plugin_replace` | 用完整配置替换，未提供的参数**重置为清单默认值** |
 | 参数修改 | 插件详情参数表单 | `plugin_params_set` | 仅按 key 覆盖指定参数，用于轮换临时 Token |
+| 调度权重 | 列表权重输入框 / 详情「调度设置」 | `plugin_patch` | `priority` 越大越优先；列表按权重降序即实际调度顺序 |
+| 文件类型 | 详情「调度设置」多选 | `plugin_patch` | `fileTypes` 限定承接范围（image/video/audio/document/archive/other），空表示全部 |
 | 插件更新 | 「更新插件」 | `plugin_update` | 升级版本号，`syncParams` 补齐清单新增参数，`resetToDefault` 重置全部默认值 |
 | 启用/停用 | 列表开关 | `plugin_toggle` | 停用后不参与自动选择，调度器同步移除检测任务 |
 | 调试 | 「调试」 | `plugin_debug` | 无副作用地执行：参数校验 → 临时凭据有效期检查 → 上游连通性探测，返回分步诊断 |
@@ -279,6 +281,19 @@ WorkBuddy 插件就是完整范例：`authorization`（Bearer Token）+ `token_e
 | 变更审计 | 插件详情「变更记录」 | `plugin_changes` | 差量/全量/更新/调试/参数修改全部留痕（actor、diff、时间） |
 | 查看文档 | 文档中心 | `plugin_docs` | 返回本文档 + 实时参数模板 |
 | 类型清单 | — | `plugin_registry` | 返回所有已编译插件类型的完整清单，供开发新插件参考 |
+
+### 调度权重与文件类型
+
+上传时的插件选择分两步：
+
+1. **按文件类型过滤**：核心层用 MIME（缺失时嗅探文件头）与扩展名判定 `category`，只保留 `FileTypes` 包含该类型（或未配置、表示全部）的已启用插件。
+2. **按权重排序**：在候选插件中取 `Priority` 最大者；权重相同时按健康状态排序（healthy → unknown → degraded）。已判定 `unhealthy` 的插件会被跳过，除非没有其他候选。
+
+```json
+{ "priority": 320, "fileTypes": ["image", "document"] }
+```
+
+后台插件列表的权重输入框、详情页「调度设置」与 MCP `plugin_patch` 改的是同一份数据，写入都会记入变更审计。声明式插件源码里也可写 `fileTypes`，保存源码时同步到实例。
 
 ### 版本与更新
 

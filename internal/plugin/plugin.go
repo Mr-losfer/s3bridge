@@ -22,6 +22,8 @@ var (
 	ErrPluginDisabled = errors.New("插件已停用")
 	ErrInvalidParams  = errors.New("插件参数校验失败")
 	ErrUpstream       = errors.New("第三方接口返回异常")
+	// ErrFileTypeUnsupported 表示显式指定的插件不承接当前文件类型。
+	ErrFileTypeUnsupported = errors.New("插件不支持该文件类型")
 )
 
 // ParamField 描述一个插件配置项的渲染与校验规则。
@@ -66,9 +68,10 @@ type Manifest struct {
 	Capabilities []string     `json:"capabilities"`
 	Params       []ParamField `json:"params"`
 	Health       HealthHint   `json:"health"`
-	Docs         string       `json:"docs"`             // 该插件的接入说明（Markdown）
-	SampleCode   string       `json:"sampleCode"`       // 插件开发文档中的示例代码
-	Source       string       `json:"source,omitempty"` // 等价的声明式插件源码（内置插件可选提供，供 Agent 派生）
+	Docs         string       `json:"docs"`                // 该插件的接入说明（Markdown）
+	SampleCode   string       `json:"sampleCode"`          // 插件开发文档中的示例代码
+	Source       string       `json:"source,omitempty"`    // 等价的声明式插件源码（内置插件可选提供，供 Agent 派生）
+	FileTypes    []string     `json:"fileTypes,omitempty"` // 可承接的文件类型；空表示全部
 }
 
 // UploadRequest 是统一后的上传输入。

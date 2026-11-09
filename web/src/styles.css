@@ -367,3 +367,62 @@ pre.codeblock code { font-family: inherit; }
   .modal-backdrop { padding: 12px; }
   .modal-head, .modal-body, .modal-foot { padding-left: 18px; padding-right: 18px; }
 }
+
+/* ---------- 插件调度：权重与文件类型 ---------- */
+.field > .field-label { font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+.chip-checks { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-check { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; padding: 5px 11px; border: 1px solid var(--line-strong); background: var(--paper); cursor: pointer; transition: all .15s var(--ease); }
+.chip-check:hover { border-color: var(--ink-soft); }
+.chip-check input { width: 13px; height: 13px; accent-color: var(--accent); }
+.chip-check.is-on { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.weight-cell { display: flex; align-items: stretch; gap: 0; border: 1px solid var(--line-strong); background: var(--paper); width: fit-content; }
+.weight-input { width: 58px; border: 0; border-left: 1px solid var(--line); border-right: 1px solid var(--line); text-align: center; font-family: var(--mono); font-size: 12.5px; padding: 4px 2px; background: transparent; -moz-appearance: textfield; }
+.weight-input::-webkit-outer-spin-button, .weight-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+.weight-step { border: 0; background: transparent; color: var(--muted); width: 22px; font-size: 13px; line-height: 1; cursor: pointer; }
+.weight-step:hover:not(:disabled) { background: var(--surface); color: var(--ink); }
+.weight-step:disabled, .weight-input:disabled { opacity: .45; cursor: wait; }
+.tag-row { display: flex; flex-wrap: wrap; gap: 4px; }
+.schedule-panel { margin-bottom: 30px; border-color: var(--line-strong); background: var(--surface); }
+
+/* ---------- 上传列表：图片网格 + 灯箱 ---------- */
+.media-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(186px, 1fr)); gap: 14px; }
+.media-card { position: relative; border: 1px solid var(--line); background: var(--paper); display: flex; flex-direction: column; text-align: left; padding: 0; cursor: pointer; transition: border-color .16s var(--ease), transform .16s var(--ease), box-shadow .16s var(--ease); overflow: hidden; }
+.media-card:hover { border-color: var(--line-strong); transform: translateY(-2px); box-shadow: 0 10px 26px rgba(26,26,24,.09); }
+.media-thumb { position: relative; aspect-ratio: 4 / 3; background: var(--sidebar); display: grid; place-items: center; overflow: hidden; }
+.media-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.media-thumb .spinner { width: 18px; height: 18px; }
+.media-icon { font-family: var(--serif); font-size: 34px; color: var(--muted); line-height: 1; }
+.media-ext { position: absolute; bottom: 7px; left: 7px; font-family: var(--mono); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; background: rgba(26,26,24,.72); color: #fff; padding: 2px 5px; }
+.media-badge { position: absolute; top: 7px; right: 7px; font-size: 9.5px; letter-spacing: .05em; text-transform: uppercase; background: var(--paper); border: 1px solid var(--line-strong); padding: 2px 5px; }
+.media-meta { padding: 9px 11px 11px; border-top: 1px solid var(--line); min-width: 0; }
+.media-name { font-size: 12.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.media-sub { font-family: var(--mono); font-size: 10px; color: var(--muted); margin-top: 3px; display: flex; justify-content: space-between; gap: 6px; }
+.media-empty { grid-column: 1 / -1; }
+.lightbox { position: fixed; inset: 0; z-index: 300; background: rgba(18,18,16,.86); display: grid; grid-template-columns: minmax(0,1fr) 372px; gap: 0; animation: fade .16s var(--ease); }
+.lightbox-stage { position: relative; display: grid; place-items: center; padding: 46px 34px 56px; min-width: 0; }
+.lightbox-stage img { max-width: 100%; max-height: 100%; object-fit: contain; box-shadow: 0 24px 70px rgba(0,0,0,.45); background: #111; }
+.lightbox-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 40px; border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.24); color: #fff; font-size: 18px; cursor: pointer; display: grid; place-items: center; }
+.lightbox-nav:hover { background: rgba(255,255,255,.16); }
+.lightbox-nav.prev { left: 14px; }
+.lightbox-nav.next { right: 14px; }
+.lightbox-count { position: absolute; bottom: 18px; left: 50%; transform: translateX(-50%); font-family: var(--mono); font-size: 11px; color: rgba(255,255,255,.7); letter-spacing: .08em; }
+.lightbox-close { position: absolute; top: 14px; right: 14px; width: 34px; height: 34px; border: 1px solid rgba(255,255,255,.28); background: rgba(0,0,0,.24); color: #fff; font-size: 18px; cursor: pointer; }
+.lightbox-close:hover { background: rgba(255,255,255,.16); }
+.lightbox-side { background: var(--paper); border-left: 1px solid var(--line-strong); display: flex; flex-direction: column; min-height: 0; }
+.lightbox-side-head { padding: 22px 22px 16px; border-bottom: 1px solid var(--line); }
+.lightbox-side-body { padding: 18px 22px; overflow-y: auto; flex: 1; }
+.lightbox-side-foot { padding: 14px 22px; border-top: 1px solid var(--line); background: var(--surface); display: flex; flex-wrap: wrap; gap: 8px; }
+.lightbox-title { font-family: var(--serif); font-size: 19px; line-height: 1.3; margin: 6px 0 0; word-break: break-word; }
+.lightbox-kv { display: grid; grid-template-columns: 74px minmax(0,1fr); gap: 9px 12px; margin: 0; font-size: 12px; }
+.lightbox-kv dt { color: var(--muted); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; font-weight: 700; padding-top: 2px; }
+.lightbox-kv dd { margin: 0; word-break: break-all; }
+.lightbox-kv .mono { font-size: 11px; }
+@media (max-width: 860px) {
+  .lightbox { grid-template-columns: 1fr; grid-template-rows: minmax(0,1fr) auto; }
+  .lightbox-stage { padding: 40px 18px 44px; }
+  .lightbox-side { border-left: 0; border-top: 1px solid var(--line-strong); max-height: 44vh; }
+  .lightbox-side-head { padding: 14px 16px 10px; }
+  .lightbox-side-body { padding: 12px 16px; }
+  .lightbox-side-foot { padding: 10px 16px; }
+  .media-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
+}

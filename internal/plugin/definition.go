@@ -38,6 +38,7 @@ type Definition struct {
 	Author      string       `json:"author,omitempty"`
 	Endpoint    string       `json:"endpoint,omitempty"`
 	Docs        string       `json:"docs,omitempty"`
+	FileTypes   []string     `json:"fileTypes,omitempty"` // 可承接的文件类型，留空表示全部
 	Params      []ParamField `json:"params"`
 	Request     RequestSpec  `json:"request"`
 	Response    ResponseSpec `json:"response"`
@@ -127,6 +128,14 @@ func (d *Definition) Validate() error {
 	}
 	if d.Author == "" {
 		d.Author = "S3Bridge MCP"
+	}
+	types, err := ParseFileTypes(d.FileTypes)
+	if err != nil {
+		return err
+	}
+	d.FileTypes = FileTypeStrings(types)
+	if len(types) == 0 {
+		d.FileTypes = nil
 	}
 	if err := d.validateParams(); err != nil {
 		return err
@@ -291,7 +300,7 @@ func (d *Definition) ToManifest() Manifest {
 		Kind: d.Kind, Name: d.Name, Version: d.Version,
 		Description: d.Description, Author: d.Author, Endpoint: endpoint,
 		Capabilities: []string{"upload", "dynamic"},
-		Params:       d.Params, Health: h, Docs: d.Docs,
+		Params:       d.Params, Health: h, Docs: d.Docs, FileTypes: d.FileTypes,
 		SampleCode: fmt.Sprintf("// 由声明式插件源码生成，无需 Go 代码。\n// request: %s %s (mode=%s)\n// response: %s -> UploadResult.URL\n",
 			d.Request.Method, d.Request.URL, d.Request.Mode, d.Response.URLPath),
 	}

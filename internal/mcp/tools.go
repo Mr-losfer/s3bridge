@@ -71,7 +71,7 @@ func (s *Server) Tools() []Tool {
 		{Name: "system_update_dismiss", Description: "忽略指定版本的新版本弹窗（首页更新卡片仍然显示）",
 			InputSchema: schema(map[string]any{"tag": strProp("要忽略的版本号，例如 v1.1.0")}, "tag")},
 
-		{Name: "plugin_list", Description: "查看插件列表（异常插件排在前面，含状态、版本、参数警告）",
+		{Name: "plugin_list", Description: "查看插件列表（按权重从高到低排序，即实际调度顺序；含状态、版本、可承接文件类型、参数警告）",
 			InputSchema: schema(map[string]any{})},
 		{Name: "plugin_get", Description: "查看单个插件详情，含参数 Schema、分组与脱敏后的当前值",
 			InputSchema: schema(map[string]any{"id": id}, "id")},
@@ -86,16 +86,20 @@ func (s *Server) Tools() []Tool {
 		{Name: "plugin_patch", Description: "插件差量修改：只更新传入的字段，未传字段保持不变（params 按键合并）",
 			InputSchema: schema(map[string]any{
 				"id": id, "name": strProp("名称"), "description": strProp("描述"),
-				"enabled": boolProp("是否启用"), "priority": numProp("优先级"),
-				"params": objProp("要合并的参数键值对"), "health": objProp("定时检测配置"),
+				"enabled":   boolProp("是否启用"),
+				"priority":  numProp("调度权重，越大越优先被选中（同权重时健康者优先）"),
+				"fileTypes": arrProp("可承接的文件类型：image/video/audio/document/archive/other，空数组表示全部"),
+				"params":    objProp("要合并的参数键值对"), "health": objProp("定时检测配置"),
 				"expectedRevision": numProp("乐观锁版本号，可选"),
 			}, "id")},
 		{Name: "plugin_replace", Description: "插件全量修改：用传入的完整配置替换现有配置，未提供的参数重置为默认值",
 			InputSchema: schema(map[string]any{
 				"id": id, "name": strProp("名称"), "description": strProp("描述"),
-				"enabled": boolProp("是否启用"), "priority": numProp("优先级"),
-				"params": objProp("完整参数表"),
-				"health": objProp("完整定时检测配置"), "expectedRevision": numProp("乐观锁版本号，可选"),
+				"enabled":   boolProp("是否启用"),
+				"priority":  numProp("调度权重，越大越优先被选中"),
+				"fileTypes": arrProp("可承接的文件类型：image/video/audio/document/archive/other，空数组表示全部"),
+				"params":    objProp("完整参数表"),
+				"health":    objProp("完整定时检测配置"), "expectedRevision": numProp("乐观锁版本号，可选"),
 			}, "id")},
 		{Name: "plugin_update", Description: "插件更新：升级版本号并从插件清单同步新增参数模板，可重置为默认值",
 			InputSchema: schema(map[string]any{
@@ -127,6 +131,8 @@ func (s *Server) Tools() []Tool {
 				"name": strProp("显示名称"), "description": strProp("说明"),
 				"version": strProp("版本号"), "author": strProp("作者"),
 				"enabled":    boolProp("创建后是否立即启用，默认 true"),
+				"priority":   numProp("调度权重，越大越优先被选中，默认 100"),
+				"fileTypes":  arrProp("可承接的文件类型：image/video/audio/document/archive/other，留空表示全部"),
 				"definition": objProp("完整声明式插件源码（对象或 JSON 字符串）；留空生成可运行骨架"),
 				"template":   strProp("从内置插件导出等价源码作为起点，如 workbuddy"),
 				"params":     objProp("初始参数键值对"),
@@ -606,6 +612,17 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			Kind: argString(args, "kind"), Name: argString(args, "name"),
 			Version: argString(args, "version"), Description: argString(args, "description"),
 			Author: argString(args, "author"), Enabled: argBool(args["enabled"], true),
+		}
+		if v, ok := args["priority"]; ok && v != nil {
+			n := int(argIntVal(v))
+			spec.Priority = &n
+		}
+		if v, ok := args["fileTypes"]; ok && v != nil {
+			types, err := stringList(v, "fileTypes")
+			if err != nil {
+				return fail(err)
+			}
+			spec.FileTypes = types
 		}
 		if _, ok := args["definition"]; ok && args["definition"] != nil {
 			raw, err := definitionFromArgs(args, "definition")
@@ -1108,9 +1125,12 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 // ---------- helpers ----------
 
 func summary(v plugin.View) map[string]any {
+	labels := v.FileTypeLabels()
 	return map[string]any{
 		"id": v.ID, "name": v.Name, "version": v.Version, "kind": v.Kind,
-		"enabled": v.Enabled, "status": v.Status, "statusMessage": v.StatusMessage,
+		"enabled": v.Enabled, "priority": v.Priority,
+		"fileTypes": plugin.FileTypeStrings(v.FileTypes), "fileTypeLabels": labels,
+		"status": v.Status, "statusMessage": v.StatusMessage,
 		"revision": v.Revision, "warning": v.Warning, "health": v.Health,
 		"custom": v.Custom, "editable": v.Editable, "updatedAt": v.UpdatedAt,
 	}
@@ -1161,6 +1181,17 @@ func patchFromArgs(args map[string]any) (plugin.Patch, error) {
 		n := int(argIntVal(v))
 		p.Priority = &n
 	}
+	if v, ok := args["fileTypes"]; ok {
+		list, err := stringList(v, "fileTypes")
+		if err != nil {
+			return p, err
+		}
+		types, err := plugin.ParseFileTypes(list)
+		if err != nil {
+			return p, err
+		}
+		p.FileTypes = &types
+	}
 	if v, ok := args["expectedRevision"]; ok {
 		n := argIntVal(v)
 		p.ExpectedRevision = &n
@@ -1190,6 +1221,17 @@ func fullFromArgs(args map[string]any) (plugin.Full, error) {
 	f := plugin.Full{
 		Name: argString(args, "name"), Description: argString(args, "description"),
 		Enabled: argBool(args["enabled"], true), Priority: argInt(args, "priority", 100),
+	}
+	if v, ok := args["fileTypes"]; ok {
+		list, err := stringList(v, "fileTypes")
+		if err != nil {
+			return f, err
+		}
+		types, err := plugin.ParseFileTypes(list)
+		if err != nil {
+			return f, err
+		}
+		f.FileTypes = types
 	}
 	if v, ok := args["params"]; ok {
 		m, ok := v.(map[string]any)
@@ -1308,6 +1350,36 @@ func anyToPerms(v any) []store.Permission {
 		}
 	}
 	return out
+}
+
+// stringList 接受数组或逗号分隔字符串，用于 plugin_* 的 fileTypes 等参数。
+func stringList(v any, key string) ([]string, error) {
+	switch x := v.(type) {
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			out = append(out, fmt.Sprint(item))
+		}
+		return out, nil
+	case []string:
+		return x, nil
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return []string{}, nil
+		}
+		parts := strings.Split(x, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			if s := strings.TrimSpace(p); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out, nil
+	case nil:
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("%s 必须是字符串数组或逗号分隔字符串", key)
+	}
 }
 
 func jsonPretty(v any) string {

@@ -62,6 +62,7 @@ func New(cfg *config.Config, version string) (*Core, error) {
 
 	upd, err := updater.New(updater.Options{
 		Current: version, Repo: cfg.UpdateRepo, APIBaseURL: cfg.UpdateAPI,
+		Proxy: cfg.UpdateProxy,
 		Token: cfg.UpdateToken, AutoCheck: cfg.UpdateAutoCheck,
 		Interval: cfg.UpdateInterval, Strategy: cfg.UpdateStrategy, DataDir: cfg.DataDir,
 		Audit: func(action, detail string) {

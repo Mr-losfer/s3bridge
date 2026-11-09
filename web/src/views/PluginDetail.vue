@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from 'vue'
 import { api } from '../api'
 import { route, go } from '../router'
 import { notify, notifyError } from '../toast'
-import { relTime, fmtTime, renderMarkdown, truncate } from '../utils'
+import { relTime, fmtTime, renderMarkdown, truncate, categoryLabels, categoryLabel } from '../utils'
 
 const id = computed(() => route.value.id)
 const view = ref(null)
@@ -28,6 +28,13 @@ const validateResult = ref(null)
 const exportResult = ref(null)
 
 const fields = computed(() => (view.value?.manifest?.params || []))
+const fileTypeOptions = Object.entries(categoryLabels)
+const schedule = ref({ priority: 100, fileTypes: [] })
+const scheduleSaving = ref(false)
+const currentTypes = computed(() => {
+  const list = view.value?.fileTypes || []
+  return list.length ? list.map(categoryLabel) : ['全部类型']
+})
 const volatileField = computed(() => fields.value.find((f) => f.volatile && f.expiresField))
 const expiryValue = computed(() => form.value[volatileField.value?.expiresField] || '')
 const expiryHint = computed(() => {
@@ -60,10 +67,29 @@ async function load() {
     const v = await api('/plugins/' + encodeURIComponent(id.value))
     view.value = v
     initForm(v)
+    schedule.value = { priority: v.priority ?? 100, fileTypes: [...(v.fileTypes || [])] }
   } catch (e) { notifyError(e, '加载插件失败') }
   finally { loading.value = false }
 }
 onMounted(load)
+
+function toggleScheduleType(key) {
+  const list = schedule.value.fileTypes
+  const i = list.indexOf(key)
+  if (i >= 0) list.splice(i, 1)
+  else list.push(key)
+}
+async function saveSchedule() {
+  scheduleSaving.value = true
+  try {
+    await api(`/plugins/${encodeURIComponent(id.value)}`, {
+      method: 'PATCH',
+      body: { priority: Number(schedule.value.priority) || 0, fileTypes: schedule.value.fileTypes },
+    })
+    notify('调度设置已保存：权重越大越优先，文件类型决定可承接范围', { title: '调度已更新' })
+    await load()
+  } catch (e) { notifyError(e, '保存调度设置失败') } finally { scheduleSaving.value = false }
+}
 
 async function saveParams() {
   saving.value = true
@@ -192,6 +218,8 @@ function switchTab(t) {
       </div>
       <div class="btn-group">
         <span class="status" :class="'status--' + (view?.status || 'unknown')">{{ view?.status || 'unknown' }}</span>
+        <span class="tag">权重 {{ view?.priority ?? '—' }}</span>
+        <span class="tag">{{ currentTypes.join(' / ') }}</span>
         <span class="tag">v{{ view?.version }}</span>
         <span class="tag">revision {{ view?.revision }}</span>
       </div>
@@ -216,6 +244,37 @@ function switchTab(t) {
 
     <!-- 参数配置 -->
     <div v-if="tab === 'params'">
+      <div class="panel schedule-panel">
+        <div class="section-head" style="margin:0 0 18px">
+          <div>
+            <h2 class="section-title">调度设置</h2>
+            <p class="section-note">上传时先判定文件类型，再在同类型插件中按权重从高到低选择；同权重时更健康的插件优先</p>
+          </div>
+          <span class="tag">{{ currentTypes.join(' / ') }}</span>
+        </div>
+        <div class="form-grid" style="align-items:start">
+          <div class="field">
+            <label>调度权重</label>
+            <input type="number" min="0" max="9999" step="10" v-model.number="schedule.priority" />
+            <div class="field-help">数值越大越优先；列表按权重降序即为实际调度顺序</div>
+          </div>
+          <div class="field" style="grid-column:2/-1">
+            <div class="field-label">可承接文件类型</div>
+            <div class="chip-checks">
+              <label v-for="[key, label] in fileTypeOptions" :key="key" class="chip-check" :class="{ 'is-on': schedule.fileTypes.includes(key) }">
+                <input type="checkbox" :checked="schedule.fileTypes.includes(key)" @change="toggleScheduleType(key)" />
+                <span>{{ label }}</span>
+              </label>
+            </div>
+            <div class="field-help">不勾选表示全部类型；例如只勾选「图片」后，文档与压缩包会自动路由到其他插件</div>
+          </div>
+        </div>
+        <div style="margin-top:16px;display:flex;gap:9px;align-items:center">
+          <button class="btn btn--primary btn--sm" :disabled="scheduleSaving" @click="saveSchedule">{{ scheduleSaving ? '保存中…' : '保存调度设置' }}</button>
+          <span class="tiny muted">也可用 MCP 的 <code class="code">plugin_patch</code> 设置 priority / fileTypes</span>
+        </div>
+      </div>
+
       <div v-for="g in (view?.grouped || [])" :key="g.name" class="field-group">
         <h2 class="field-group-title">{{ g.name || '通用' }}</h2>
         <p class="section-note" style="margin-bottom:20px">清单定义的配置项，按类型自动渲染</p>

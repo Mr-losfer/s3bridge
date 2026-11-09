@@ -67,10 +67,8 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 		return nil, err
 	}
 
-	pluginID, err := s.mgr.Select(req.PluginID)
-	if err != nil {
-		return nil, err
-	}
+	// 先落盘再判类型：MIME 嗅探需要文件头，插件调度依赖类型，
+	// 因此把「选插件」推迟到 category 计算之后。
 
 	// 1) 流式写入临时文件
 	tmp, err := os.CreateTemp(s.objectDir, ".upload-*")
@@ -107,6 +105,13 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 	}
 	digest := hex.EncodeToString(hasher.Sum(nil))
 	category := CategoryOf(mimeType, req.FileName)
+
+	// 按文件类型选择插件：显式指定时校验其承接能力，否则在同类插件中取权重最高者。
+	pluginID, err := s.mgr.Select(req.PluginID, category)
+	if err != nil {
+		_ = tmp.Close()
+		return nil, err
+	}
 
 	key := strings.TrimSpace(req.ObjectKey)
 	if key == "" {

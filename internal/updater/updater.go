@@ -33,6 +33,7 @@ type Status struct {
 	AutoCheck         bool        `json:"autoCheck"`
 	CheckIntervalSecs int         `json:"checkIntervalSecs"`
 	Repo              string      `json:"repo"`
+	Proxy             string      `json:"proxy"`
 	Strategy          string      `json:"strategy"`
 	StrategyNote      string      `json:"strategyNote"`
 	PersistCommand    string      `json:"persistCommand"`
@@ -61,6 +62,7 @@ type Options struct {
 	Current    string
 	Repo       string
 	APIBaseURL string
+	Proxy      string // GitHub 加速代理，如 https://gh-proxy.com；空表示直连
 	Token      string
 	AutoCheck  bool
 	Interval   time.Duration
@@ -128,7 +130,7 @@ func New(opts Options) (*Updater, error) {
 	if opts.DataDir == "" {
 		opts.DataDir = "./data"
 	}
-	client, err := NewClient(opts.APIBaseURL, opts.Repo, opts.Token)
+	client, err := NewClient(opts.APIBaseURL, opts.Repo, opts.Token, opts.Proxy)
 	if err != nil {
 		return nil, err
 	}
@@ -148,7 +150,8 @@ func New(opts Options) (*Updater, error) {
 		strategy: strategy, audit: opts.Audit,
 	}
 	u.status = Status{
-		Current: opts.Current, Repo: opts.Repo, AutoCheck: opts.AutoCheck,
+		Current: opts.Current, Repo: opts.Repo, Proxy: opts.Proxy,
+		AutoCheck:         opts.AutoCheck,
 		CheckIntervalSecs: int(opts.Interval.Seconds()), Strategy: strategy,
 		StrategyNote: note, PersistCommand: persist,
 		Apply: ApplyStatus{Phase: PhaseIdle, Message: "尚未执行更新", Log: []string{}},

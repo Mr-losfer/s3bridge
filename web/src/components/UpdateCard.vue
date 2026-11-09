@@ -12,6 +12,11 @@ import UpdateNotes from './UpdateNotes.vue'
 const canApply = computed(() => can('system:manage'))
 const status = computed(() => update.status)
 const release = computed(() => update.status?.latest || null)
+const proxyLabel = computed(() => {
+  const p = status.value?.proxy
+  if (!p) return ''
+  try { return new URL(p).host } catch { return p }
+})
 
 // 首页卡片只展示「重要内容高亮」的条目；没有重点时退化为普通更新条目。
 const briefSections = computed(() => {
@@ -64,6 +69,7 @@ async function onDismiss() { if (release.value) await dismissUpdate(release.valu
         </div>
         <p class="update-card-desc">
           发布于 {{ relTime(release.publishedAt) }} · 共 {{ totalItems }} 条更新内容 ·
+          <template v-if="proxyLabel">经 <span class="mono">{{ proxyLabel }}</span> 加速 · </template>
           点击「立即更新」将自动完成下载、校验、替换与重启。
         </p>
       </div>
@@ -112,6 +118,7 @@ async function onDismiss() { if (release.value) await dismissUpdate(release.valu
           <span v-if="status?.autoCheck"> · {{ intervalLabel(status.checkIntervalSecs) }}</span>
           <span v-else> · 自动检测已关闭</span>
           <span v-if="status?.strategy"> · {{ status.strategy === 'container' ? '容器部署' : '二进制部署' }}</span>
+          <span v-if="proxyLabel"> · 经 <span class="mono">{{ proxyLabel }}</span> 加速</span>
         </div>
       </div>
       <button class="btn btn--sm" :disabled="update.checking" @click="onCheck">

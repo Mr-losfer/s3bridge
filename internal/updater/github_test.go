@@ -82,7 +82,7 @@ func TestFetchLatest(t *testing.T) {
 		Tag: "v1.1.0", Body: sampleChangelog, Archive: []byte("archive"),
 		Checksums: "abc  s3bridge_linux_amd64.tar.gz\n",
 	})
-	c, err := NewClient(srv.URL, "owner/repo", "")
+	c, err := NewClient(srv.URL, "owner/repo", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestFetchLatestErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := newMockReleaseServer(t, tc.opts)
-			c, err := NewClient(srv.URL, "owner/repo", "")
+			c, err := NewClient(srv.URL, "owner/repo", "", "")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -130,11 +130,11 @@ func TestFetchLatestErrors(t *testing.T) {
 
 func TestClientRejectsInvalidConfig(t *testing.T) {
 	for _, repo := range []string{"", "owner", "owner/repo/../../admin", "owner/repo?x=1"} {
-		if _, err := NewClient("https://api.github.com", repo, ""); err == nil {
+		if _, err := NewClient("https://api.github.com", repo, "", ""); err == nil {
 			t.Fatalf("仓库 %q 应被拒绝", repo)
 		}
 	}
-	if _, err := NewClient("ftp://example.com", "owner/repo", ""); err == nil {
+	if _, err := NewClient("ftp://example.com", "owner/repo", "", ""); err == nil {
 		t.Fatal("非 HTTP(S) API 地址应被拒绝")
 	}
 }
@@ -144,7 +144,7 @@ func TestDownloadSizeLimit(t *testing.T) {
 		_, _ = w.Write([]byte(strings.Repeat("x", 4096)))
 	}))
 	defer srv.Close()
-	c, err := NewClient(srv.URL, "owner/repo", "")
+	c, err := NewClient(srv.URL, "owner/repo", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestFetchChecksums(t *testing.T) {
 		fmt.Fprintf(w, "%s  *s3bridge_linux_amd64.tar.gz\ninvalid line\n", strings.ToUpper(digest))
 	}))
 	defer srv.Close()
-	c, err := NewClient(srv.URL, "owner/repo", "")
+	c, err := NewClient(srv.URL, "owner/repo", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,5 +172,59 @@ func TestFetchChecksums(t *testing.T) {
 	}
 	if got := sums["s3bridge_linux_amd64.tar.gz"]; got != digest {
 		t.Fatalf("校验值解析错误：%q", got)
+	}
+}
+
+func TestProxyCandidatesPreferProxy(t *testing.T) {
+	c, err := NewClient("https://api.github.com", "owner/repo", "", "https://gh-proxy.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := c.candidates("https://api.github.com/repos/owner/repo/releases/latest")
+	want := []string{
+		"https://gh-proxy.com/https://api.github.com/repos/owner/repo/releases/latest",
+		"https://api.github.com/repos/owner/repo/releases/latest",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("候选地址数量错误：%v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("候选地址[%d] = %q，期望 %q", i, got[i], want[i])
+		}
+	}
+	// 非 GitHub 域名（自建镜像 / 本地 mock）不应被改写。
+	local := c.candidates("http://127.0.0.1:9000/repos/owner/repo/releases/latest")
+	if len(local) != 1 || !strings.HasPrefix(local[0], "http://127.0.0.1:9000/") {
+		t.Fatalf("非 GitHub 域名不应走代理：%v", local)
+	}
+}
+
+func TestProxyURLValidation(t *testing.T) {
+	if _, err := NewClient("https://api.github.com", "owner/repo", "", "ftp://gh-proxy.com"); err == nil {
+		t.Fatal("非法代理协议应被拒绝")
+	}
+	c, err := NewClient("https://api.github.com", "owner/repo", "", "https://gh-proxy.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.allowedURL("https://gh-proxy.com/https://github.com/o/r/releases/download/v1/a.tgz"); err != nil {
+		t.Fatalf("代理域名应在白名单内：%v", err)
+	}
+}
+
+func TestRateLimitMessageMentionsProxy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+	}))
+	defer srv.Close()
+	c, err := NewClient(srv.URL, "owner/repo", "", "https://gh-proxy.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = c.FetchLatest(context.Background(), runtime.GOOS, runtime.GOARCH)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 403") || !strings.Contains(err.Error(), "S3BRIDGE_UPDATE_TOKEN") {
+		t.Fatalf("403 应给出可操作提示：%v", err)
 	}
 }

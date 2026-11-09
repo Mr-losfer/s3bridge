@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { api, uploadFile, getToken } from '../api'
 import { notify, notifyError } from '../toast'
 import { formatBytes, fmtTime, categoryLabel } from '../utils'
@@ -21,12 +21,44 @@ const history = ref([])
 const isImage = computed(() => (file.value?.type || '').startsWith('image/'))
 const canUpload = computed(() => !!file.value && !uploading.value)
 
+const EXT_CATEGORY = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic'],
+  video: ['mp4', 'mov', 'mkv', 'webm', 'avi'],
+  audio: ['mp3', 'wav', 'flac', 'aac', 'm4a'],
+  document: ['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'json'],
+  archive: ['zip', 'tar', 'gz', '7z', 'rar'],
+}
+// 与服务端 CategoryOf 保持同一优先级：MIME 优先，其次扩展名。
+function detectCategory(f) {
+  const mime = (f.type || '').toLowerCase().split(';')[0]
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/')) return 'audio'
+  if (mime.startsWith('text/') || /pdf|word|excel|sheet|presentation|json|xml|csv|markdown/.test(mime)) return 'document'
+  if (/zip|tar|gzip|compressed|7z|rar/.test(mime)) return 'archive'
+  const ext = (f.name.split('.').pop() || '').toLowerCase()
+  for (const [cat, list] of Object.entries(EXT_CATEGORY)) if (list.includes(ext)) return cat
+  return 'other'
+}
+
+const category = computed(() => (file.value ? detectCategory(file.value) : ''))
+// 只列出能承接当前类型的插件；服务端还会按权重与健康状态做最终选择。
+const eligiblePlugins = computed(() => {
+  if (!category.value) return plugins.value
+  return plugins.value.filter((p) => !p.fileTypes?.length || p.fileTypes.includes(category.value))
+})
+const autoPick = computed(() => eligiblePlugins.value[0] || null)
+
+watch(eligiblePlugins, (list) => {
+  if (pluginId.value && !list.some((p) => p.id === pluginId.value)) pluginId.value = ''
+})
+
 async function loadMeta() {
   try {
     const [p, b] = await Promise.all([api('/plugins'), api('/buckets')])
     plugins.value = (p || []).filter((x) => x.enabled)
     buckets.value = b || []
-    if (!pluginId.value && plugins.value.length) pluginId.value = plugins.value[0].id
+    // 默认保持自动选择：由服务端按文件类型 + 权重 + 健康状态挑选。
     if (!buckets.value.find((x) => x.name === bucket.value) && buckets.value.length) bucket.value = buckets.value[0].name
   } catch (e) { notifyError(e, '加载配置失败') }
 }
@@ -107,9 +139,16 @@ function copy(text, label) {
           <div class="field">
             <label>上传插件</label>
             <select v-model="pluginId">
-              <option value="">自动选择（健康优先）</option>
-              <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }} · {{ p.status }}</option>
+              <option value="">自动选择（按文件类型 + 权重）</option>
+              <option v-for="p in eligiblePlugins" :key="p.id" :value="p.id">{{ p.name }} · 权重 {{ p.priority }} · {{ p.status }}</option>
             </select>
+            <div class="field-help">
+              <template v-if="category">
+                检测到 <span class="tag tag--accent">{{ categoryLabel(category) }}</span>
+                可承接插件 {{ eligiblePlugins.length }} 个<template v-if="autoPick">；自动模式会选 <strong>{{ autoPick.name }}</strong>（权重 {{ autoPick.priority }}）</template>
+              </template>
+              <template v-else>选择文件后自动按类型过滤插件</template>
+            </div>
           </div>
           <div class="field" style="grid-column:1/-1">
             <label>对象键（可选）</label>
@@ -142,6 +181,7 @@ function copy(text, label) {
             <dt>文件名</dt><dd>{{ result.fileName }}</dd>
             <dt>对象键</dt><dd class="mono" style="word-break:break-all">{{ result.objectKey }}</dd>
             <dt>文件类型</dt><dd>{{ categoryLabel(result.category) }} · <span class="mono tiny">{{ result.mimeType }}</span></dd>
+            <dt>命中插件</dt><dd class="mono">{{ result.pluginId }} <span class="muted tiny">（{{ result.provider }}）</span></dd>
             <dt>大小</dt><dd class="mono">{{ formatBytes(result.size) }}</dd>
             <dt>存储桶</dt><dd class="mono">{{ result.bucket }}</dd>
             <dt>签名到期</dt><dd>{{ result.urlExpireAt ? fmtTime(result.urlExpireAt) : '长期有效' }}</dd>

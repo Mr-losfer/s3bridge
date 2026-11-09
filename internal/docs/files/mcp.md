@@ -82,10 +82,10 @@ curl -s -X POST http://localhost:8080/mcp \
 
 | 工具 | 说明 | 主要参数 |
 | --- | --- | --- |
-| `plugin_list` | 插件列表，异常插件排前面，含状态/版本/参数警告 | — |
+| `plugin_list` | 插件列表，**按调度权重降序**（即实际使用顺序），含状态/版本/可承接文件类型/参数警告 | — |
 | `plugin_get` | 单个插件详情：参数 Schema、分组、脱敏后的当前值 | `id` |
 | `plugin_registry` | 内置类型清单与完整参数 Schema，并列出所有自定义插件 | — |
-| `plugin_create` | **创建插件**：从零建立插件实例，可附完整声明式源码或从内置模板派生，创建即可用 | `kind` `name` `definition` `template` `params` `enabled` |
+| `plugin_create` | **创建插件**：从零建立插件实例，可附完整声明式源码或从内置模板派生，创建即可用 | `kind` `name` `definition` `template` `params` `enabled` `priority` `fileTypes` |
 | `plugin_code_get` | **读取插件源码**：完整声明式定义、规范化 JSON 与参数 Schema（内置插件返回只读等价模板） | `id` |
 | `plugin_code_upload` | **上传/全量替换源码**：即时编译生效、无需重启，带乐观锁与审计 | `id` `definition` `expectedRevision` |
 | `plugin_code_patch` | **差量修改源码**：点号路径 + `params` 按 key 合并，只改指定字段 | `id` `patch` `expectedRevision` |
@@ -94,8 +94,8 @@ curl -s -X POST http://localhost:8080/mcp \
 | `plugin_delete` | **删除自定义插件**（内置插件只能停用），变更记录保留 | `id` |
 | `plugin_docs` | 插件开发文档全文 + 实时参数模板 | `topic` |
 | `plugin_debug` | **插件调试**：无副作用地执行参数校验、临时凭据有效期检查、上游连通性探测，返回分步诊断 | `id` |
-| `plugin_patch` | **差量修改**：只更新传入字段，`params` 按键合并 | `id` `name` `description` `enabled` `priority` `params` `health` `expectedRevision` |
-| `plugin_replace` | **全量修改**：完整配置替换，未提供的参数重置为默认值 | 同上 |
+| `plugin_patch` | **差量修改**：只更新传入字段，`params` 按键合并；可改调度权重与文件类型 | `id` `name` `description` `enabled` `priority` `fileTypes` `params` `health` `expectedRevision` |
+| `plugin_replace` | **全量修改**：完整配置替换，未提供的参数重置为默认值 | 同上（含 `priority` / `fileTypes`） |
 | `plugin_update` | **插件更新**：升级版本、同步清单新增参数 | `id` `version` `syncParams` `resetToDefault` `note` |
 | `plugin_params_set` | **参数修改**：按 key 覆盖，用于轮换临时 Token | `id` `params` |
 | `plugin_toggle` | 启用/停用插件 | `id` `enabled` |
@@ -105,6 +105,19 @@ curl -s -X POST http://localhost:8080/mcp \
 | `plugin_parse_token` | 解析 WorkBuddy Bearer Token 的 `exp` 与 `sub`，自动得到过期时间与 `x-user-id` | `authorization` |
 | `s3_docs` | S3 开放接口文档 | — |
 | `installation_docs` | 安装部署文档 | — |
+
+#### 调度权重与文件类型
+
+每个插件有两个调度属性，Agent 可用 `plugin_patch` 直接调整：
+
+- `priority`（权重）：**数值越大越优先被选中**。自动选择时先按文件类型过滤，再取权重最高者；权重相同时健康状态更好的优先，已判定 `unhealthy` 的插件排到最后。
+- `fileTypes`：插件可承接的文件类型多选，取值 `image` / `video` / `audio` / `document` / `archive` / `other`；**空数组表示全部类型**。上传时先按 MIME 与扩展名判定类型，再在该类型的插件池里按权重选择。
+
+```json
+{"name":"plugin_patch","arguments":{"id":"workbuddy","priority":320,"fileTypes":["image","document"]}}
+```
+
+> 显式传入 `pluginId` 时不再自动挑选，但会校验该插件是否承接当前文件类型；不承接时返回「插件不支持该文件类型」。
 
 ### 告警
 

@@ -176,6 +176,22 @@ var AllCategories = []FileCategory{
 	CategoryDoc, CategoryArchive, CategoryOther,
 }
 
+// ValidCategory 判断文件类型是否是受支持的归档类型。
+func ValidCategory(c FileCategory) bool {
+	for _, x := range AllCategories {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+// CategoryLabels 是类型的中文名，供 MCP 响应与前端提示复用。
+var CategoryLabels = map[FileCategory]string{
+	CategoryImage: "图片", CategoryVideo: "视频", CategoryAudio: "音频",
+	CategoryDoc: "文档", CategoryArchive: "压缩包", CategoryOther: "其他",
+}
+
 // Object 是统一标准输出落库后的对象元数据。
 type Object struct {
 	ID          string       `json:"id"`
@@ -226,8 +242,9 @@ type Plugin struct {
 	Version       string            `json:"version"`
 	Author        string            `json:"author"`
 	Enabled       bool              `json:"enabled"`
-	Priority      int               `json:"priority"`
-	Params        map[string]string `json:"params"` // 敏感值以 enc: 前缀加密存储
+	Priority      int               `json:"priority"`  // 调度权重：越大越优先被选中
+	FileTypes     []FileCategory    `json:"fileTypes"` // 可承接的文件类型；空表示全部
+	Params        map[string]string `json:"params"`    // 敏感值以 enc: 前缀加密存储
 	Status        PluginStatus      `json:"status"`
 	StatusMessage string            `json:"statusMessage"`
 	LastCheckedAt *time.Time        `json:"lastCheckedAt,omitempty"`
@@ -241,6 +258,36 @@ type Plugin struct {
 	Custom        bool              `json:"custom"`               // 是否由 MCP/后台动态创建
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
+}
+
+// Supports 判断插件是否承接该文件类型。未配置 FileTypes 视为全部支持，
+// 保证旧数据与内置插件在升级后行为不变。
+func (p *Plugin) Supports(c FileCategory) bool {
+	if len(p.FileTypes) == 0 {
+		return true
+	}
+	for _, x := range p.FileTypes {
+		if x == c {
+			return true
+		}
+	}
+	return false
+}
+
+// FileTypeLabels 返回适合直接展示的类型名列表。
+func (p *Plugin) FileTypeLabels() []string {
+	if len(p.FileTypes) == 0 {
+		return []string{"全部类型"}
+	}
+	out := make([]string, 0, len(p.FileTypes))
+	for _, c := range p.FileTypes {
+		if label, ok := CategoryLabels[c]; ok {
+			out = append(out, label)
+		} else {
+			out = append(out, string(c))
+		}
+	}
+	return out
 }
 
 // ChangeLog 记录插件的差量/全量修改与更新，供 MCP 与审计页回溯。

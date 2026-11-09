@@ -221,7 +221,8 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 | `S3BRIDGE_READ_TIMEOUT` | `60s` | HTTP 读超时 |
 | `S3BRIDGE_UPDATE_REPO` | `Mr-losfer/s3bridge` | 检测更新所用的 GitHub 仓库（`owner/repo`） |
 | `S3BRIDGE_UPDATE_API` | `https://api.github.com` | Releases API 地址；自建镜像或本地测试可覆盖 |
-| `S3BRIDGE_UPDATE_TOKEN` | 空 | 可选 GitHub Token，用于提高 API 限额；**只走环境变量，绝不写入仓库文件** |
+| `S3BRIDGE_UPDATE_PROXY` | `https://gh-proxy.com` | GitHub 加速代理：检测与资产下载优先经代理，失败自动回退直连；设为 `off` 关闭 |
+| `S3BRIDGE_UPDATE_TOKEN` | 空 | 可选 GitHub Token，用于提高 API 限额；**只走环境变量，绝不写入仓库文件**；不会透传给代理 |
 | `S3BRIDGE_UPDATE_INTERVAL` | `6h` | 自动检测间隔，最小 `1m` |
 | `S3BRIDGE_UPDATE_AUTO_CHECK` | `true` | 是否启用定时检测；关闭后仍可在后台手动点「检测更新」 |
 | `S3BRIDGE_UPDATE_STRATEGY` | `auto` | `auto`（自动识别容器）/ `binary` / `container` |
@@ -305,7 +306,7 @@ s3.example.com {
 
 容器部署若还想同步更新官方镜像，更新完成弹窗会给出可复制命令：`docker compose pull && docker compose up -d`。
 
-如不希望自动检测，设置 `S3BRIDGE_UPDATE_AUTO_CHECK=false`；内网环境可通过 `S3BRIDGE_UPDATE_TOKEN` 提高 GitHub API 限额。
+如不希望自动检测，设置 `S3BRIDGE_UPDATE_AUTO_CHECK=false`。更新检测默认优先经 `https://gh-proxy.com` 代理访问 GitHub，遇到代理不可用或返回 403 会自动回退直连；仍被限流时配置 `S3BRIDGE_UPDATE_TOKEN` 提高额度，或换一个 `S3BRIDGE_UPDATE_PROXY`。
 
 ### 9.2 手动备份与升级
 

@@ -59,10 +59,11 @@ func (m *Manager) EnsureBuiltin() error {
 			if mf.Health.IntervalSecs > 0 {
 				every = mf.Health.IntervalSecs
 			}
+			types, _ := ParseFileTypes(mf.FileTypes)
 			st.Plugins = append(st.Plugins, store.Plugin{
 				ID: mf.Kind, Kind: mf.Kind, Name: mf.Name,
 				Description: mf.Description, Version: mf.Version, Author: mf.Author,
-				Enabled: true, Priority: 100,
+				Enabled: true, Priority: 100, FileTypes: types,
 				Params: DefaultParams(mf),
 				Status: store.StatusUnknown, StatusMessage: "尚未执行健康检测",
 				Health: store.HealthConfig{
@@ -96,28 +97,17 @@ func (m *Manager) List() ([]View, error) {
 		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
-		ri, rj := statusRank(out[i].Status), statusRank(out[j].Status)
-		if ri != rj {
-			return ri < rj
+		// 列表顺序即调度顺序：权重高者在前，同权重时更健康的在前。
+		if out[i].Priority != out[j].Priority {
+			return out[i].Priority > out[j].Priority
 		}
-		return out[i].Priority > out[j].Priority
+		hi, hj := healthRank(out[i].Status), healthRank(out[j].Status)
+		if hi != hj {
+			return hi > hj
+		}
+		return out[i].Name < out[j].Name
 	})
 	return out, nil
-}
-
-func statusRank(s store.PluginStatus) int {
-	switch s {
-	case store.StatusUnhealthy:
-		return 0
-	case store.StatusDegraded:
-		return 1
-	case store.StatusUnknown:
-		return 2
-	case store.StatusHealthy:
-		return 3
-	default:
-		return 4
-	}
 }
 
 func (m *Manager) Get(id string) (View, error) {
@@ -184,23 +174,25 @@ func (m *Manager) viewOf(p *store.Plugin) (View, error) {
 // ---------- 差量 / 全量 / 参数修改 ----------
 
 type Patch struct {
-	Name             *string             `json:"name,omitempty"`
-	Description      *string             `json:"description,omitempty"`
-	Enabled          *bool               `json:"enabled,omitempty"`
-	Priority         *int                `json:"priority,omitempty"`
-	Params           map[string]string   `json:"params,omitempty"`
-	Health           *store.HealthConfig `json:"health,omitempty"`
-	ExpectedRevision *int64              `json:"expectedRevision,omitempty"`
+	Name             *string               `json:"name,omitempty"`
+	Description      *string               `json:"description,omitempty"`
+	Enabled          *bool                 `json:"enabled,omitempty"`
+	Priority         *int                  `json:"priority,omitempty"`
+	FileTypes        *[]store.FileCategory `json:"fileTypes,omitempty"`
+	Params           map[string]string     `json:"params,omitempty"`
+	Health           *store.HealthConfig   `json:"health,omitempty"`
+	ExpectedRevision *int64                `json:"expectedRevision,omitempty"`
 }
 
 type Full struct {
-	Name             string             `json:"name"`
-	Description      string             `json:"description"`
-	Enabled          bool               `json:"enabled"`
-	Priority         int                `json:"priority"`
-	Params           map[string]string  `json:"params"`
-	Health           store.HealthConfig `json:"health"`
-	ExpectedRevision *int64             `json:"expectedRevision,omitempty"`
+	Name             string               `json:"name"`
+	Description      string               `json:"description"`
+	Enabled          bool                 `json:"enabled"`
+	Priority         int                  `json:"priority"`
+	FileTypes        []store.FileCategory `json:"fileTypes"`
+	Params           map[string]string    `json:"params"`
+	Health           store.HealthConfig   `json:"health"`
+	ExpectedRevision *int64               `json:"expectedRevision,omitempty"`
 }
 
 // Patch 差量修改：只覆盖传入的字段，params 按键合并。
@@ -240,6 +232,16 @@ func (m *Manager) Patch(id string, patch Patch, actor string) (View, error) {
 		if patch.Priority != nil && *patch.Priority != p.Priority {
 			diff["priority"] = fmt.Sprintf("%d → %d", p.Priority, *patch.Priority)
 			p.Priority = *patch.Priority
+		}
+		if patch.FileTypes != nil {
+			types, err := normalizeFileTypes(*patch.FileTypes)
+			if err != nil {
+				return err
+			}
+			if !sameFileTypes(p.FileTypes, types) {
+				diff["fileTypes"] = fmt.Sprintf("%v → %v", FileTypeStrings(p.FileTypes), FileTypeStrings(types))
+				p.FileTypes = types
+			}
 		}
 		if patch.Health != nil {
 			if err := validateHealth(*patch.Health); err != nil {
@@ -316,10 +318,15 @@ func (m *Manager) Replace(id string, full Full, actor string) (View, error) {
 		if name == "" {
 			name = mf.Manifest.Name
 		}
+		types, err := normalizeFileTypes(full.FileTypes)
+		if err != nil {
+			return err
+		}
 		p.Name = name
 		p.Description = full.Description
 		p.Enabled = full.Enabled
 		p.Priority = full.Priority
+		p.FileTypes = types
 		p.Health = full.Health
 		p.Params = sealed
 		p.Status = store.StatusUnknown
@@ -658,9 +665,13 @@ func (m *Manager) Upload(ctx context.Context, id string, req UploadRequest) (*Up
 	return result, nil
 }
 
-// Select 按「已启用 + 健康优先 + 优先级」挑选插件，未指定时使用。
-func (m *Manager) Select(preferred string) (string, error) {
+// Select 为某类文件挑选插件：权重（Priority）高者优先，同权重时健康者优先。
+// 优先排除已判定异常（unhealthy）的插件；若没有可用者再降级到全部已启用插件，
+// 避免「唯一插件被标记异常」导致上传统统失败。
+func (m *Manager) Select(preferred string, category store.FileCategory) (string, error) {
 	var id string
+	var fallback string
+	fallbackPriority := 0
 	err := m.st.View(func(st *store.State) error {
 		if preferred != "" {
 			p := store.PluginByID(st, preferred)
@@ -670,23 +681,33 @@ func (m *Manager) Select(preferred string) (string, error) {
 			if !p.Enabled {
 				return ErrPluginDisabled
 			}
+			if !p.Supports(category) {
+				return fmt.Errorf("%w：插件 %s 只承接 %s，当前文件是 %s",
+					ErrFileTypeUnsupported, p.Name,
+					strings.Join(FileTypeStrings(p.FileTypes), "/"), category)
+			}
 			id = p.ID
 			return nil
 		}
-		best := -1
+		bestPriority, bestRank := -1, -1
 		for i := range st.Plugins {
 			p := &st.Plugins[i]
-			if !p.Enabled || p.Status == store.StatusUnhealthy {
+			if !p.Enabled || !p.Supports(category) {
 				continue
 			}
-			score := p.Priority
-			if p.Status == store.StatusHealthy {
-				score += 1000
+			if p.Status == store.StatusUnhealthy {
+				if fallback == "" || p.Priority > fallbackPriority {
+					fallback, fallbackPriority = p.ID, p.Priority
+				}
+				continue
 			}
-			if score > best {
-				best = score
-				id = p.ID
+			rank := healthRank(p.Status)
+			if p.Priority > bestPriority || (p.Priority == bestPriority && rank > bestRank) {
+				bestPriority, bestRank, id = p.Priority, rank, p.ID
 			}
+		}
+		if id == "" {
+			id = fallback
 		}
 		return nil
 	})
@@ -694,9 +715,39 @@ func (m *Manager) Select(preferred string) (string, error) {
 		return "", err
 	}
 	if id == "" {
-		return "", errors.New("没有可用的上传插件，请在插件管理中检查配置与健康状态")
+		return "", fmt.Errorf("没有可用的上传插件（文件类型：%s），请在插件管理中启用插件或调整其支持的文件类型", category)
 	}
 	return id, nil
+}
+
+// Eligible 返回能承接该类文件的已启用插件 ID，供上传测试页与 MCP 预检使用。
+func (m *Manager) Eligible(category store.FileCategory) []string {
+	out := []string{}
+	_ = m.st.View(func(st *store.State) error {
+		for i := range st.Plugins {
+			p := &st.Plugins[i]
+			if p.Enabled && p.Supports(category) && p.Status != store.StatusUnhealthy {
+				out = append(out, p.ID)
+			}
+		}
+		return nil
+	})
+	sort.SliceStable(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// healthRank 把健康状态映射为同权重下的比较值：越健康越大。
+func healthRank(s store.PluginStatus) int {
+	switch s {
+	case store.StatusHealthy:
+		return 3
+	case store.StatusUnknown:
+		return 2
+	case store.StatusDegraded:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (m *Manager) SetHealth(id string, h store.HealthConfig, actor string) (View, error) {
@@ -717,6 +768,28 @@ func (m *Manager) AckAlert(id, actor string) error {
 }
 
 // ---------- helpers ----------
+
+// normalizeFileTypes 校验并去重，顺序统一按 store.AllCategories，避免
+// 不同入口写入的顺序不一致导致 diff 抖动。
+func normalizeFileTypes(in []store.FileCategory) ([]store.FileCategory, error) {
+	raw := make([]string, 0, len(in))
+	for _, c := range in {
+		raw = append(raw, string(c))
+	}
+	return ParseFileTypes(raw)
+}
+
+func sameFileTypes(a, b []store.FileCategory) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
 
 func mergeParams(base, patch map[string]string) map[string]string {
 	out := make(map[string]string, len(base)+len(patch))

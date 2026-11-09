@@ -133,9 +133,17 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 	}
 	_, out = mustOK("plugin_create", map[string]any{
 		"kind": "agent-up", "name": "Agent 上传器", "definition": def, "enabled": true,
+		"priority": 260, "fileTypes": []any{"image", "document"},
 	})
 	if obj(out)["created"] != "agent-up" {
 		t.Fatalf("创建失败: %+v", out)
+	}
+	createdPlugin := obj(obj(out)["plugin"])
+	if createdPlugin["priority"] != float64(260) {
+		t.Fatalf("创建时权重未生效: %+v", createdPlugin)
+	}
+	if types, ok := createdPlugin["fileTypes"].([]any); !ok || len(types) != 2 || types[0] != "image" {
+		t.Fatalf("创建时文件类型未生效: %+v", createdPlugin)
 	}
 
 	// ---- 3. 读回源码 ----

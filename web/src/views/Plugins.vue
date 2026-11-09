@@ -3,7 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { api } from '../api'
 import { go } from '../router'
 import { notify, notifyError } from '../toast'
-import { relTime, statusText, truncate } from '../utils'
+import { relTime, statusText, truncate, categoryLabels, categoryLabel } from '../utils'
 
 const plugins = ref([])
 const loading = ref(true)
@@ -11,24 +11,32 @@ const busyId = ref('')
 const healthTarget = ref(null)
 const healthForm = ref({})
 const saving = ref(false)
+const weightDraft = ref({})
 
 const unhealthyCount = computed(() => plugins.value.filter((p) => p.status === 'unhealthy').length)
 const customCount = computed(() => plugins.value.filter((p) => p.custom).length)
+const fileTypeOptions = Object.entries(categoryLabels)
 
 const createOpen = ref(false)
 const creating = ref(false)
-const createForm = ref({ kind: '', name: '', version: '', description: '', template: '', enabled: true })
+const createForm = ref({ kind: '', name: '', version: '', description: '', template: '', enabled: true, priority: 100, fileTypes: [] })
 
 function openCreate() {
-  createForm.value = { kind: '', name: '', version: '', description: '', template: '', enabled: true }
+  createForm.value = { kind: '', name: '', version: '', description: '', template: '', enabled: true, priority: 100, fileTypes: [] }
   createOpen.value = true
+}
+function toggleCreateType(key) {
+  const list = createForm.value.fileTypes
+  const i = list.indexOf(key)
+  if (i >= 0) list.splice(i, 1)
+  else list.push(key)
 }
 async function submitCreate() {
   const kind = createForm.value.kind.trim().toLowerCase()
   if (!/^[a-z][a-z0-9_-]{1,63}$/.test(kind)) { notifyError(new Error('插件 ID 需小写字母开头，仅含小写字母/数字/下划线/连字符')); return }
   creating.value = true
   try {
-    const r = await api('/plugins', { method: 'POST', body: { ...createForm.value, kind } })
+    const r = await api('/plugins', { method: 'POST', body: { ...createForm.value, kind, priority: Number(createForm.value.priority) || 0 } })
     notify('插件已创建，去详情页编写源码即可生效', { title: kind })
     createOpen.value = false
     await load()
@@ -38,11 +46,40 @@ async function submitCreate() {
 
 async function load() {
   loading.value = true
-  try { plugins.value = (await api('/plugins')) || [] }
+  try {
+    plugins.value = (await api('/plugins')) || []
+    const draft = {}
+    for (const p of plugins.value) draft[p.id] = p.priority
+    weightDraft.value = draft
+  }
   catch (e) { notifyError(e, '加载插件失败') }
   finally { loading.value = false }
 }
 onMounted(load)
+
+// 权重决定调度顺序：数值越大越优先，同权重时更健康的插件优先。
+async function savePriority(p) {
+  const next = Number(weightDraft.value[p.id])
+  if (!Number.isFinite(next) || next === p.priority) return
+  busyId.value = p.id
+  try {
+    await api(`/plugins/${encodeURIComponent(p.id)}`, { method: 'PATCH', body: { priority: next } })
+    notify(`${p.name} 权重已设为 ${next}，越大越优先被调度`, { title: '调度权重已更新' })
+    await load()
+  } catch (e) {
+    weightDraft.value[p.id] = p.priority
+    notifyError(e, '权重保存失败')
+  } finally { busyId.value = '' }
+}
+function adjustPriority(p, delta) {
+  const cur = Number(weightDraft.value[p.id] ?? p.priority)
+  weightDraft.value[p.id] = Math.max(0, Math.min(9999, cur + delta))
+  savePriority(p)
+}
+function typeLabel(p) {
+  if (!p.fileTypes || !p.fileTypes.length) return ['全部类型']
+  return p.fileTypes.map(categoryLabel)
+}
 
 async function toggle(p) {
   busyId.value = p.id
@@ -100,7 +137,7 @@ async function saveHealth() {
       <div>
         <div class="eyebrow">Plugins / 插件管理</div>
         <h1 class="page-title">插件列表</h1>
-        <p class="page-desc">每个插件把一家第三方上传接口转换成统一标准输出。点击插件配置临时参数，异常插件会置顶标红。</p>
+        <p class="page-desc">每个插件把一家第三方上传接口转换成统一标准输出。<strong>权重越大越优先被调度</strong>，并可限定承接的文件类型；上传时先判定文件类型，再在同类型插件中按权重选择。</p>
       </div>
       <div class="btn-group">
         <button class="btn" @click="checkAll">◎ 全部检测</button>
@@ -122,25 +159,47 @@ async function saveHealth() {
     <div class="table-wrap">
       <table>
         <thead>
-          <tr><th>插件</th><th>状态</th><th>版本</th><th>优先级</th><th>定时检测</th><th>上次检测</th><th>提示</th><th></th></tr>
+          <tr><th>插件</th><th>状态</th><th>调度权重</th><th>文件类型</th><th>定时检测</th><th>提示</th><th></th></tr>
         </thead>
         <tbody>
           <tr v-for="p in plugins" :key="p.id" :class="{ 'is-unhealthy': p.status === 'unhealthy' }">
             <td style="cursor:pointer" @click="go('plugin', p.id)">
               <div class="cell-main">{{ p.name }} <span v-if="!p.enabled" class="tag">停用</span></div>
-              <div class="cell-sub">{{ p.id }} · {{ p.kind }} · {{ p.author }}</div>
+              <div class="cell-sub">{{ p.id }} · v{{ p.version }} · {{ p.kind }}</div>
             </td>
             <td><span class="status" :class="'status--' + p.status">{{ statusText(p.status) }}</span></td>
-            <td class="mono">{{ p.version }}</td>
-            <td class="num mono">{{ p.priority }}</td>
+            <td>
+              <div class="weight-cell">
+                <button class="weight-step" :disabled="busyId === p.id" title="降低权重" @click="adjustPriority(p, -10)">−</button>
+                <input
+                  class="weight-input"
+                  type="number"
+                  min="0"
+                  max="9999"
+                  step="10"
+                  :value="weightDraft[p.id]"
+                  :disabled="busyId === p.id"
+                  @input="weightDraft[p.id] = $event.target.value"
+                  @keyup.enter="savePriority(p)"
+                  @blur="savePriority(p)"
+                />
+                <button class="weight-step" :disabled="busyId === p.id" title="提高权重" @click="adjustPriority(p, 10)">＋</button>
+              </div>
+              <div class="cell-sub">越大越优先</div>
+            </td>
+            <td>
+              <div class="tag-row">
+                <span v-for="t in typeLabel(p)" :key="t" class="tag" :class="{ 'tag--accent': t === '全部类型' }">{{ t }}</span>
+              </div>
+            </td>
             <td>
               <div class="mono tiny">{{ p.health?.enabled ? p.health.intervalSecs + 's / ' + p.health.failThreshold + ' 次' : '已关闭' }}</div>
+              <div class="cell-sub">{{ relTime(p.lastCheckedAt) }}<span v-if="p.latencyMs"> · {{ p.latencyMs }}ms</span></div>
               <button class="btn btn--quiet btn--sm" style="padding:2px 4px;font-size:11px" @click="openHealth(p)">设置</button>
             </td>
-            <td class="muted tiny nowrap">{{ relTime(p.lastCheckedAt) }}<div v-if="p.latencyMs" class="cell-sub">{{ p.latencyMs }}ms</div></td>
-            <td class="tiny" style="max-width:260px">
-              <span v-if="p.warning" style="color:var(--warn)">{{ truncate(p.warning, 72) }}</span>
-              <span v-else class="muted">{{ truncate(p.statusMessage, 72) || '—' }}</span>
+            <td class="tiny" style="max-width:240px">
+              <span v-if="p.warning" style="color:var(--warn)">{{ truncate(p.warning, 64) }}</span>
+              <span v-else class="muted">{{ truncate(p.statusMessage, 64) || '—' }}</span>
             </td>
             <td>
               <div class="row-actions">
@@ -150,7 +209,7 @@ async function saveHealth() {
               </div>
             </td>
           </tr>
-          <tr v-if="!plugins.length && !loading"><td colspan="8"><div class="empty"><div class="empty-title">没有插件</div><p>内置插件类型会在启动后自动注册。</p></div></td></tr>
+          <tr v-if="!plugins.length && !loading"><td colspan="7"><div class="empty"><div class="empty-title">没有插件</div><p>内置插件类型会在启动后自动注册。</p></div></td></tr>
         </tbody>
       </table>
     </div>
@@ -160,6 +219,7 @@ async function saveHealth() {
       <div class="panel" style="margin-top:18px">
         <p style="margin:0;font-size:13px;line-height:1.8">
           在插件详情页，表单由插件清单（Manifest）的 <code class="code">Params</code> 自动生成：不同类型渲染为文本框、密码框、下拉框或开关，按 <code class="code">Group</code> 分区。
+          <strong>调度权重</strong>决定同类型插件被选中的优先级，权重越大越先使用；<strong>文件类型</strong>限制插件只承接图片、文档、压缩包等指定类别，未勾选表示全部。
           标记为 <span class="tag tag--warn">临时参数</span> 的字段（如 WorkBuddy 的 Bearer Token）需要设置过期时间，系统会在到期前 24 小时提醒，过期后健康检测判定为异常并在列表标红。
           敏感字段在服务端以 AES-256-GCM 加密存储，列表只返回脱敏值。
         </p>
@@ -199,6 +259,21 @@ async function saveHealth() {
             <div class="field">
               <label>立即启用</label>
               <div class="checkbox-row"><input type="checkbox" v-model="createForm.enabled" /><span>创建后加入可用插件池</span></div>
+            </div>
+            <div class="field">
+              <label>调度权重</label>
+              <input type="number" min="0" max="9999" step="10" v-model.number="createForm.priority" />
+              <div class="field-help">数值越大越优先被选中；同权重时健康插件优先</div>
+            </div>
+            <div class="field" style="grid-column:1/-1">
+              <div class="field-label">可承接文件类型</div>
+              <div class="chip-checks">
+                <label v-for="[key, label] in fileTypeOptions" :key="key" class="chip-check" :class="{ 'is-on': createForm.fileTypes.includes(key) }">
+                  <input type="checkbox" :checked="createForm.fileTypes.includes(key)" @change="toggleCreateType(key)" />
+                  <span>{{ label }}</span>
+                </label>
+              </div>
+              <div class="field-help">不勾选表示全部类型；上传时按文件类型匹配插件，再按权重从高到低选择</div>
             </div>
           </div>
           <div class="divider"></div>

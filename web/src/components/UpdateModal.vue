@@ -155,6 +155,7 @@ function copyPersist() {
         <UpdateNotes :sections="release.notes || []" />
         <div v-if="status?.strategyNote" class="update-strategy-note">
           <strong>更新方式</strong>：{{ status.strategyNote }}
+          <div v-if="status?.proxy" style="margin-top:6px"><strong>加速代理</strong>：<span class="mono">{{ status.proxy }}</span>（失败自动回退直连）</div>
         </div>
         <div v-if="!canApply" class="update-hint" style="margin-top:12px">
           当前账号无 system:manage 权限，自动更新需管理员操作；更新内容仍可正常查看。

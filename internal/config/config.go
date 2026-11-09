@@ -32,6 +32,7 @@ const (
 	EnvReadTimeout    = "S3BRIDGE_READ_TIMEOUT"
 	EnvUpdateRepo     = "S3BRIDGE_UPDATE_REPO"
 	EnvUpdateAPI      = "S3BRIDGE_UPDATE_API"
+	EnvUpdateProxy    = "S3BRIDGE_UPDATE_PROXY"
 	EnvUpdateToken    = "S3BRIDGE_UPDATE_TOKEN"
 	EnvUpdateInterval = "S3BRIDGE_UPDATE_INTERVAL"
 	EnvUpdateAuto     = "S3BRIDGE_UPDATE_AUTO_CHECK"
@@ -56,6 +57,7 @@ type Config struct {
 	WriteTimeout       time.Duration
 	UpdateRepo         string
 	UpdateAPI          string
+	UpdateProxy        string
 	UpdateToken        string
 	UpdateInterval     time.Duration
 	UpdateAutoCheck    bool
@@ -78,6 +80,7 @@ func Load() (*Config, error) {
 		WriteTimeout:       60 * time.Second,
 		UpdateRepo:         env(EnvUpdateRepo, "Mr-losfer/s3bridge"),
 		UpdateAPI:          env(EnvUpdateAPI, "https://api.github.com"),
+		UpdateProxy:        env(EnvUpdateProxy, "https://gh-proxy.com"),
 		UpdateToken:        os.Getenv(EnvUpdateToken), // 仅走环境变量，绝不落盘
 		UpdateInterval:     envDuration(EnvUpdateInterval, 6*time.Hour),
 		UpdateAutoCheck:    envBool(EnvUpdateAuto, true),
@@ -85,6 +88,11 @@ func Load() (*Config, error) {
 	}
 	if c.MaxUploadBytes <= 0 {
 		return nil, fmt.Errorf("%s 必须为正数", EnvMaxUploadBytes)
+	}
+	// 允许显式关闭代理（走直连）：off/none/direct/-。
+	switch strings.ToLower(strings.TrimSpace(c.UpdateProxy)) {
+	case "off", "none", "direct", "-":
+		c.UpdateProxy = ""
 	}
 	if c.DefaultHealthEvery < 10*time.Second {
 		return nil, fmt.Errorf("%s 不得小于 10s，避免对第三方造成压力", EnvHealthInterval)
