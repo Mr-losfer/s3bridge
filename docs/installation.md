@@ -209,7 +209,7 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `S3BRIDGE_ADDR` | `:8080` | 监听地址，如 `127.0.0.1:8080` |
-| `S3BRIDGE_DATA_DIR` | `./data` | 数据目录（容器内 `/app/data`），存放 `state.json`、`master.key`、`objects/` |
+| `S3BRIDGE_DATA_DIR` | `./data` | 数据目录（容器内 `/app/data`），存放 `state.json`、`master.key`、`objects/`、监控数据 `obs/` 与缩略图缓存 `thumbs/` |
 | `S3BRIDGE_MASTER_KEY` | 自动生成 | 32 字节主密钥（base64 或原始串），用于加密敏感参数与 API Key。**生产建议显式设置并备份** |
 | `S3BRIDGE_BOOTSTRAP_USER` | `admin` | 初始管理员用户名 |
 | `S3BRIDGE_BOOTSTRAP_PASSWORD` | 随机生成 | 初始管理员密码；不设置时随机生成并**只在启动日志打印一次** |
@@ -326,6 +326,16 @@ sudo systemctl start s3bridge
 ```
 
 数据结构是纯目录，回滚只需替换二进制、恢复数据目录。
+
+数据目录内的可回收部分（备份时可按需排除）：
+
+| 目录 | 内容 | 是否可删 |
+| --- | --- | --- |
+| `objects/` | 归档的对象本体 | **不可删**，删了等于删业务数据 |
+| `obs/metrics.gob` | 指标快照（重启后恢复曲线） | 可删，代价是历史曲线归零 |
+| `obs/events/` | 异常日志 JSONL（8 MB 轮转 × 3 份） | 可删 |
+| `thumbs/` | 缩略图缓存（按 SHA-256 + 宽度） | 可删，会按需重新生成 |
+| `updates/` | 自更新下载的旧版本备份 | 可删 |
 
 ---
 
