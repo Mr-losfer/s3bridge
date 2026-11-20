@@ -7,7 +7,10 @@ import {
   update, checkUpdate, openUpdateModal, closeUpdateModal,
   dismissUpdate, startUpdate,
 } from '../update'
+import { CircleAlert, CircleCheck, Loader2, RefreshCw, ArrowUpCircle } from 'lucide-vue-next'
 import UpdateNotes from './UpdateNotes.vue'
+import Button from './ui/Button.vue'
+import Badge from './ui/Badge.vue'
 
 const canApply = computed(() => can('system:manage'))
 const status = computed(() => update.status)
@@ -57,75 +60,88 @@ async function onDismiss() { if (release.value) await dismissUpdate(release.valu
 
 <template>
   <!-- 发现新版本 -->
-  <div v-if="status?.updateAvailable && release" class="update-card is-new">
-    <div class="update-card-main">
-      <div class="update-card-left">
-        <div class="eyebrow" style="margin-bottom:8px">Release / 发现新版本</div>
-        <div class="update-card-title">
-          <span class="update-version-new">{{ release.tag }}</span>
-          <span class="update-arrow">←</span>
-          <span class="update-version-old">{{ status.current }}</span>
-          <span v-if="release.highlightCount" class="tag tag--accent">{{ release.highlightCount }} 项重点</span>
+  <div v-if="status?.updateAvailable && release" class="mb-5 overflow-hidden rounded-xl border border-primary/30 bg-card shadow-sm">
+    <div class="flex flex-col gap-4 p-4 sm:flex-row sm:items-start sm:justify-between sm:p-5">
+      <div class="min-w-0 flex-1">
+        <p class="text-[10.5px] font-medium tracking-[0.08em] text-primary">RELEASE / 发现新版本</p>
+        <div class="mt-1.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span class="font-mono text-lg font-semibold text-primary">{{ release.tag }}</span>
+          <span class="text-muted-foreground">←</span>
+          <span class="font-mono text-[13px] text-muted-foreground line-through">{{ status.current }}</span>
+          <Badge v-if="release.highlightCount" variant="primary">{{ release.highlightCount }} 项重点</Badge>
         </div>
-        <p class="update-card-desc">
+        <p class="mt-2 text-[12px] leading-relaxed text-muted-foreground">
           发布于 {{ relTime(release.publishedAt) }} · 共 {{ totalItems }} 条更新内容 ·
-          <template v-if="proxyLabel">经 <span class="mono">{{ proxyLabel }}</span> 加速 · </template>
-          点击「立即更新」将自动完成下载、校验、替换与重启。
+          <template v-if="proxyLabel">经 {{ proxyLabel }} 加速 · </template>
+          自动完成下载、校验、替换与重启。
         </p>
       </div>
-      <div class="btn-group update-card-actions">
-        <button class="btn btn--sm" @click="openUpdateModal">查看更新内容</button>
-        <button class="btn btn--sm btn--quiet" @click="onLater">稍后提醒</button>
-        <button
-          class="btn btn--sm btn--primary" :disabled="!canApply || !status.restartConfigured"
+      <div class="flex flex-wrap items-center gap-2 sm:justify-end">
+        <Button size="sm" variant="outline" @click="openUpdateModal">查看内容</Button>
+        <Button size="sm" variant="ghost" @click="onLater">稍后</Button>
+        <Button
+          size="sm" :disabled="!canApply || !status.restartConfigured"
           :title="canApply ? '自动下载并安装新版本' : '仅管理员可执行更新'"
           @click="startUpdate"
-        >立即更新 ↑</button>
-        <button class="btn btn--sm btn--quiet" @click="onDismiss">忽略此版本</button>
+        >
+          <ArrowUpCircle />立即更新
+        </Button>
+        <Button size="sm" variant="ghost" class="text-muted-foreground" @click="onDismiss">忽略</Button>
       </div>
     </div>
-    <div v-if="briefSections.length" class="update-card-notes">
+
+    <div v-if="briefSections.length" class="border-t bg-muted/35 px-4 py-3.5 sm:px-5">
       <UpdateNotes :sections="briefSections" empty-text="该版本未提供更新说明。" />
-      <button v-if="totalItems > 4" class="btn btn--quiet btn--sm" style="margin-top:8px" @click="openUpdateModal">
+      <Button v-if="totalItems > 4" variant="link" size="sm" class="mt-1 h-auto px-0" @click="openUpdateModal">
         展开全部 {{ totalItems }} 条更新内容 →
-      </button>
+      </Button>
     </div>
-    <div v-if="!canApply" class="update-hint">当前账号无 system:manage 权限，更新需管理员操作。</div>
-    <div v-else-if="!status.restartConfigured" class="update-hint">当前运行方式未启用自重启，无法自动更新（常见于独立 MCP 进程）。</div>
+
+    <p v-if="!canApply" class="border-t bg-warning/10 px-4 py-2 text-[11.5px] text-warning sm:px-5">
+      当前账号无 system:manage 权限，更新需管理员操作。
+    </p>
+    <p v-else-if="!status.restartConfigured" class="border-t bg-warning/10 px-4 py-2 text-[11.5px] text-warning sm:px-5">
+      当前运行方式未启用自重启，无法自动更新（常见于独立 MCP 进程）。
+    </p>
   </div>
 
   <!-- 已是最新 / 未检测 / 检测失败 -->
-  <div v-else class="update-card" :class="{ 'is-error': !!status?.checkError || !!update.error }">
-    <div class="update-card-inline">
-      <span class="update-card-mark" :class="{ 'is-error': !!status?.checkError || !!update.error }">
-        {{ status?.checkError || update.error ? '!' : status ? '✓' : '·' }}
-      </span>
-      <div style="flex:1;min-width:0">
-        <div class="update-inline-title">
+  <div v-else class="mb-5 rounded-xl border bg-card">
+    <div class="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:px-5">
+      <div
+        class="grid size-8 shrink-0 place-items-center rounded-full"
+        :class="status?.checkError || update.error ? 'bg-destructive/10 text-destructive' : 'bg-success/10 text-success'"
+      >
+        <component
+          :is="status?.checkError || update.error ? CircleAlert : (status ? CircleCheck : RefreshCw)"
+          class="size-4"
+          :class="!status && !update.error && 'text-muted-foreground'"
+        />
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="text-[12.5px] font-medium leading-snug">
           <template v-if="update.checking">正在从 GitHub Releases 检测新版本…</template>
           <template v-else-if="status?.checkError || update.error">
             更新检测失败：{{ status?.checkError || update.error }}
           </template>
           <template v-else-if="status && !status.updateAvailable">
-            已是最新版本 <span class="mono">{{ status.current }}</span>
-            <span v-if="status.checkedAt" class="muted tiny"> · 上次检测 {{ relTime(status.checkedAt) }}</span>
-            <span v-if="status.latest?.tag && status.latest.tag !== status.current" class="muted tiny"> · 仓库最新 {{ status.latest.tag }}</span>
+            已是最新版本 <span class="font-mono">{{ status.current }}</span>
+            <span v-if="status.checkedAt" class="font-normal text-muted-foreground"> · 上次检测 {{ relTime(status.checkedAt) }}</span>
           </template>
-          <template v-else>正在获取版本更新状态… 也可点击右侧按钮立即检查 GitHub Releases。</template>
-        </div>
-        <div class="update-inline-sub muted tiny">
-          仓库 <span class="mono">{{ status?.repo || 'Mr-losfer/s3bridge' }}</span>
+          <template v-else>正在获取版本更新状态…</template>
+        </p>
+        <p class="mt-0.5 text-[11px] text-muted-foreground">
+          仓库 <span class="font-mono">{{ status?.repo || 'Mr-losfer/s3bridge' }}</span>
           <span v-if="status?.autoCheck"> · {{ intervalLabel(status.checkIntervalSecs) }}</span>
           <span v-else> · 自动检测已关闭</span>
-          <span v-if="status?.strategy"> · {{ status.strategy === 'container' ? '容器部署' : '二进制部署' }}</span>
-          <span v-if="proxyLabel"> · 经 <span class="mono">{{ proxyLabel }}</span> 加速</span>
-        </div>
+          <span v-if="proxyLabel"> · 经 {{ proxyLabel }} 加速</span>
+        </p>
       </div>
-      <button class="btn btn--sm" :disabled="update.checking" @click="onCheck">
-        <span v-if="update.checking" class="spinner"></span>
-        <span v-else>↻</span>
+      <Button size="sm" variant="outline" :disabled="update.checking" class="sm:shrink-0" @click="onCheck">
+        <Loader2 v-if="update.checking" class="animate-spin" />
+        <RefreshCw v-else />
         {{ update.checking ? '检测中' : '检测更新' }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>

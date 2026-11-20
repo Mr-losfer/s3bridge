@@ -86,8 +86,10 @@ release:
   name_template: "S3Bridge {{ .Version }}"
   header: |
     ### 版本亮点
-    * **重要：后台首页自动检测本仓库 Releases 新版本**，更新要点按重要程度高亮，点击「立即更新」自动完成下载、SHA256 校验、备份、替换与重启
-    * feat: 容器部署下新版本写入数据卷，重建容器后仍保持更新结果
+    * **重要：后台 UI 全面重构为 shadcn/ui 风格**，桌面与移动端自适应、亮暗双主题，全部业务能力与接口保持不变
+    * feat: 引入 Tailwind CSS 4 与 shadcn-vue 原语，建立语义 token 体系，13 个页面统一重写
+    * feat: 桌面固定侧栏 + 移动端顶栏抽屉导航，表格页在窄屏自动降级为卡片列表
+    * fix: 修复移动端 MCP 页长命令块导致的横向溢出、暗色模式下卡片层次不清
   footer: |
     ---
     **安装**：见 [安装与部署文档](https://github.com/Mr-losfer/s3bridge/blob/main/docs/installation.md)

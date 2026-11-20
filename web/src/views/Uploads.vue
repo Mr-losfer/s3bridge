@@ -1,10 +1,24 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
+import {
+  RefreshCw, Upload, Search, X, ChevronLeft, ChevronRight, Download, Copy, Trash2,
+  ImageOff, FileText, FileArchive, Film, Music, File, Filter, Images, Database, Image as ImageIcon,
+} from 'lucide-vue-next'
 import { api, downloadObject, getToken } from '../api'
 import { notify, notifyError } from '../toast'
 import { go } from '../router'
 import { formatBytes, relTime, fmtTime, categoryLabel, categoryLabels } from '../utils'
 import ObjectThumb from '../components/ObjectThumb.vue'
+import PageHeader from '../components/PageHeader.vue'
+import StatCard from '../components/StatCard.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Input from '../components/ui/Input.vue'
+import Select from '../components/ui/Select.vue'
+import Card from '../components/ui/Card.vue'
+import Empty from '../components/ui/Empty.vue'
+import Skeleton from '../components/ui/Skeleton.vue'
+import Field from '../components/ui/Field.vue'
 
 const items = ref([])
 const buckets = ref([])
@@ -27,9 +41,8 @@ function extOf(o) {
   const i = n.lastIndexOf('.')
   return i > 0 ? n.slice(i + 1).slice(0, 6) : 'file'
 }
-function categoryIcon(o) {
-  return { video: '▶', audio: '♪', document: '¶', archive: '▤', other: '◇' }[o.category] || '◇'
-}
+const catIcons = { video: Film, audio: Music, document: FileText, archive: FileArchive, other: File }
+function categoryIcon(o) { return catIcons[o.category] || File }
 
 function buildQuery() {
   const q = new URLSearchParams()
@@ -63,6 +76,11 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   closeLightbox(true)
+})
+
+// 灯箱打开时锁定页面滚动，避免移动端背景跟随滑动。
+watch(preview, (v) => {
+  document.body.style.overflow = v ? 'hidden' : ''
 })
 
 function resetFilters() {
@@ -137,156 +155,185 @@ function copy(text, label, id = '') {
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">Objects / 上传归档</div>
-        <h1 class="page-title">上传列表</h1>
-        <p class="page-desc">图片为主的网格视图：缩略图按需加载，点击任意对象在弹窗中查看大图与完整元数据。归档路径为 <code class="code">{bucket}/{文件类型}/{年月}/</code>。</p>
-      </div>
-      <div class="btn-group">
-        <button class="btn" @click="load">↻ 刷新</button>
-        <button class="btn btn--primary" @click="go('uploadtest')">↑ 上传测试</button>
-      </div>
+    <PageHeader
+      title="上传列表"
+      description="图片为主的网格视图：缩略图按需加载，点击任意对象查看大图与完整元数据。归档路径为 {bucket}/{文件类型}/{年月}/。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
+        <Button @click="go('uploadtest')"><Upload />上传测试</Button>
+      </template>
+    </PageHeader>
+
+    <div class="grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <StatCard label="当前结果" :value="summary.total ?? items.length" unit="objects" :hint="`合计 ${formatBytes(summary.totalBytes)}`" :icon="Images" />
+      <StatCard
+        label="图片" :value="imageCount" unit="images"
+        :hint="Object.entries(summary.categories || {}).map(([k, v]) => categoryLabel(k) + ' ' + v).join(' · ') || '暂无数据'"
+        :icon="ImageIcon"
+      />
+      <StatCard label="涉及存储桶" :value="Object.keys(summary.buckets || {}).length" unit="buckets" :hint="Object.keys(summary.buckets || {}).join(', ') || '暂无数据'" :icon="Database" />
+      <StatCard label="生效筛选" :value="activeFilters" unit="项" hint="按 bucket / 类型 / 插件 / 关键字组合过滤" :icon="Filter" />
     </div>
 
-    <div class="metrics" style="grid-template-columns:repeat(4,1fr)">
-      <div class="metric">
-        <div class="metric-label">当前结果</div>
-        <div class="metric-value">{{ summary.total ?? items.length }}<span class="metric-unit">objects</span></div>
-        <div class="metric-foot">合计 {{ formatBytes(summary.totalBytes) }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">图片</div>
-        <div class="metric-value">{{ imageCount }}<span class="metric-unit">images</span></div>
-        <div class="metric-foot">{{ Object.entries(summary.categories || {}).map(([k, v]) => categoryLabel(k) + ' ' + v).join(' · ') || '暂无数据' }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">涉及存储桶</div>
-        <div class="metric-value">{{ Object.keys(summary.buckets || {}).length }}<span class="metric-unit">buckets</span></div>
-        <div class="metric-foot">{{ Object.keys(summary.buckets || {}).join(', ') || '暂无数据' }}</div>
-      </div>
-      <div class="metric">
-        <div class="metric-label">生效筛选</div>
-        <div class="metric-value">{{ activeFilters }}<span class="metric-unit">项</span></div>
-        <div class="metric-foot">按 bucket / 类型 / 插件 / 关键字组合过滤</div>
-      </div>
-    </div>
-
-    <div class="section">
-      <div class="section-head">
-        <div><h2 class="section-title">归档对象</h2><p class="section-note">最多展示最近 300 条；完整数据可通过 S3 ListObjectsV2 分页获取</p></div>
-      </div>
-
-      <div class="filters" style="margin:18px 0 20px">
-        <div class="field">
-          <label>存储桶</label>
-          <select v-model="filters.bucket" @change="load">
+    <Card class="mt-5 p-3.5 sm:p-4">
+      <div class="grid grid-cols-2 gap-2.5 sm:flex sm:flex-wrap sm:items-end">
+        <Field label="存储桶" class="sm:w-40">
+          <Select v-model="filters.bucket" @update:model-value="load">
             <option value="">全部存储桶</option>
             <option v-for="b in buckets" :key="b.name" :value="b.name">{{ b.name }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>文件类型</label>
-          <select v-model="filters.category" @change="load">
+          </Select>
+        </Field>
+        <Field label="文件类型" class="sm:w-36">
+          <Select v-model="filters.category" @update:model-value="load">
             <option value="">全部类型</option>
             <option v-for="[k, label] in categories" :key="k" :value="k">{{ label }}</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>来源插件</label>
-          <select v-model="filters.pluginId" @change="load">
+          </Select>
+        </Field>
+        <Field label="来源插件" class="sm:w-40">
+          <Select v-model="filters.pluginId" @update:model-value="load">
             <option value="">全部插件</option>
             <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }}</option>
-          </select>
+          </Select>
+        </Field>
+        <Field label="文件名关键字" class="col-span-2 sm:w-52 sm:flex-1">
+          <div class="relative">
+            <Search class="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+            <Input v-model="filters.keyword" placeholder="输入后回车" class="pl-8" @keyup.enter="load" />
+          </div>
+        </Field>
+        <div class="col-span-2 flex gap-2 sm:col-span-1">
+          <Button class="flex-1 sm:flex-none" @click="load"><Search />筛选</Button>
+          <Button v-if="activeFilters" variant="ghost" @click="resetFilters"><X />清除</Button>
         </div>
-        <div class="field" style="min-width:210px">
-          <label>文件名关键字</label>
-          <input v-model="filters.keyword" placeholder="输入后回车" @keyup.enter="load" />
-        </div>
-        <button class="btn btn--primary" @click="load">筛选</button>
-        <button v-if="activeFilters" class="btn btn--quiet" @click="resetFilters">清除</button>
       </div>
+    </Card>
 
-      <div v-if="loading" class="empty"><span class="spinner"></span> 正在加载…</div>
-      <div v-else-if="items.length" class="media-grid">
-        <button v-for="o in items" :key="o.id" class="media-card" @click="openLightbox(o)">
-          <ObjectThumb v-if="isImage(o)" :bucket="o.bucket" :object-key="o.objectKey" :alt="o.fileName" />
-          <div v-else class="media-thumb">
-            <div class="media-icon">{{ categoryIcon(o) }}</div>
-          </div>
-          <span class="media-ext">{{ extOf(o) }}</span>
-          <span class="media-badge" :class="{ 'tag--accent': false }">{{ categoryLabel(o.category) }}</span>
-          <div class="media-meta">
-            <div class="media-name" :title="o.fileName">{{ o.fileName }}</div>
-            <div class="media-sub">
-              <span>{{ formatBytes(o.size) }}</span>
-              <span>{{ relTime(o.createdAt) }}</span>
-            </div>
-          </div>
-        </button>
-      </div>
-      <div v-else class="empty media-empty">
-        <div class="empty-title">{{ activeFilters ? '没有符合条件的对象' : '还没有上传记录' }}</div>
-        <p>{{ activeFilters ? '试试放宽筛选条件。' : '去上传测试台用一张图片验证插件链路。' }}</p>
-        <button class="btn btn--primary btn--sm" @click="go('uploadtest')">开始上传</button>
-      </div>
+    <div v-if="loading" class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+      <Skeleton v-for="i in 10" :key="i" class="aspect-[4/3] rounded-xl" />
     </div>
 
-    <!-- 图片灯箱：左侧大图，右侧元数据。Teleport 到 body 避免被页面容器的 transform 限制定位 -->
+    <div v-else-if="items.length" class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+      <button
+        v-for="o in items" :key="o.id"
+        class="group relative overflow-hidden rounded-xl border bg-card text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        @click="openLightbox(o)"
+      >
+        <div class="relative">
+          <ObjectThumb v-if="isImage(o)" :bucket="o.bucket" :object-key="o.objectKey" :alt="o.fileName" />
+          <div v-else class="flex aspect-[4/3] w-full items-center justify-center bg-muted/60">
+            <component :is="categoryIcon(o)" class="size-7 text-muted-foreground/60" />
+          </div>
+          <span class="absolute bottom-1.5 left-1.5 rounded bg-black/65 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-white backdrop-blur-sm">
+            {{ extOf(o) }}
+          </span>
+          <Badge variant="outline" class="absolute right-1.5 top-1.5 border-border/60 bg-background/90 backdrop-blur-sm">{{ categoryLabel(o.category) }}</Badge>
+        </div>
+        <div class="border-t px-2.5 py-2">
+          <p class="truncate text-[12px] font-medium" :title="o.fileName">{{ o.fileName }}</p>
+          <div class="mt-0.5 flex items-center justify-between gap-2 font-mono text-[10px] text-muted-foreground">
+            <span>{{ formatBytes(o.size) }}</span>
+            <span>{{ relTime(o.createdAt) }}</span>
+          </div>
+        </div>
+      </button>
+    </div>
+
+    <Card v-else class="mt-4">
+      <Empty
+        :title="activeFilters ? '没有符合条件的对象' : '还没有上传记录'"
+        :description="activeFilters ? '试试放宽筛选条件。' : '去上传测试台用一张图片验证插件链路。'"
+      >
+        <Button size="sm" @click="activeFilters ? resetFilters() : go('uploadtest')">{{ activeFilters ? '清除筛选' : '开始上传' }}</Button>
+      </Empty>
+    </Card>
+
+    <!-- 灯箱：桌面左图右数据；移动端上图、下信息 -->
     <Teleport to="body">
-      <div v-if="preview" class="lightbox" @click.self="closeLightbox()">
-      <div class="lightbox-stage" @click.self="closeLightbox()">
-        <button class="lightbox-close" title="关闭 (Esc)" @click="closeLightbox()">✕</button>
-        <button class="lightbox-nav prev" title="上一个 (←)" @click="step(-1)">‹</button>
-        <img v-if="preview.url" :src="preview.url" :alt="preview.obj.fileName" @click.stop />
-        <div v-else-if="preview.loading" class="spinner" style="border-color:rgba(255,255,255,.25);border-top-color:#fff"></div>
-        <div v-else class="lightbox-noimg">
-          <div class="media-icon" style="color:rgba(255,255,255,.6);font-size:52px">{{ categoryIcon(preview.obj) }}</div>
-          <p class="tiny" style="color:rgba(255,255,255,.72);margin-top:12px">
-            {{ preview.error || '该类型不支持在线预览，请在右侧下载原文件' }}
-          </p>
-        </div>
-        <button class="lightbox-nav next" title="下一个 (→)" @click="step(1)">›</button>
-        <div class="lightbox-count">{{ previewIndex + 1 }} / {{ items.length }}</div>
-      </div>
+      <div v-if="preview" class="fixed inset-0 z-[120] flex flex-col bg-[oklch(0.13_0.004_60)] lg:grid lg:grid-cols-[minmax(0,1fr)_360px] lg:grid-rows-1" @click.self="closeLightbox()">
+        <div class="relative flex min-h-0 flex-1 items-center justify-center px-4 py-12 sm:px-12">
+          <button
+            class="absolute right-3 top-3 z-10 grid size-9 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white"
+            aria-label="关闭" @click="closeLightbox()"
+          ><X class="size-4.5" /></button>
 
-      <aside class="lightbox-side">
-        <div class="lightbox-side-head">
-          <div class="eyebrow">Object Detail</div>
-          <h2 class="lightbox-title">{{ preview.obj.fileName }}</h2>
-          <p class="tiny muted" style="margin:6px 0 0">{{ categoryLabel(preview.obj.category) }} · {{ formatBytes(preview.obj.size) }} · {{ relTime(preview.obj.createdAt) }}</p>
-        </div>
-        <div class="lightbox-side-body">
-          <dl class="lightbox-kv">
-            <dt>存储桶</dt><dd class="mono">{{ preview.obj.bucket }}</dd>
-            <dt>对象键</dt><dd class="mono">{{ preview.obj.objectKey }}</dd>
-            <dt>MIME</dt><dd class="mono">{{ preview.obj.mimeType }}</dd>
-            <dt>大小</dt><dd class="mono">{{ preview.obj.size.toLocaleString() }} 字节</dd>
-            <dt>来源插件</dt><dd class="mono">{{ preview.obj.pluginId }}<span class="muted"> · {{ preview.obj.provider || '—' }}</span></dd>
-            <dt>归档时间</dt><dd>{{ fmtTime(preview.obj.createdAt) }}</dd>
-            <dt>签名到期</dt><dd>{{ preview.obj.urlExpireAt ? fmtTime(preview.obj.urlExpireAt) : '长期有效（本地归档）' }}</dd>
-            <dt>SHA-256</dt><dd class="mono">{{ preview.obj.sha256 }}</dd>
-          </dl>
+          <button
+            v-if="items.length > 1"
+            class="absolute left-2 top-1/2 z-10 grid size-9 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white sm:left-4"
+            aria-label="上一个" @click="step(-1)"
+          ><ChevronLeft class="size-5" /></button>
 
-          <div class="divider" style="margin:18px 0"></div>
-
-          <div class="field">
-            <label>第三方返回 URL</label>
-            <div class="mono tiny" style="word-break:break-all">{{ preview.obj.remoteUrl || '—' }}</div>
-            <div class="field-help">临时签名链接可能过期；本地归档对象通过 S3 接口读取长期有效</div>
+          <img
+            v-if="preview.url" :src="preview.url" :alt="preview.obj.fileName"
+            class="max-h-full max-w-full rounded object-contain shadow-2xl" @click.stop
+          />
+          <div v-else-if="preview.loading" class="flex flex-col items-center gap-3 text-white/60">
+            <span class="size-5 animate-spin rounded-full border-2 border-white/20 border-t-white/80" />
+            <span class="text-[11.5px]">正在读取对象…</span>
           </div>
-          <div class="field" style="margin-top:14px">
-            <label>本地归档路径</label>
-            <div class="mono tiny" style="word-break:break-all">{{ preview.obj.localPath || '—' }}</div>
+          <div v-else class="flex max-w-xs flex-col items-center gap-2 px-4 text-center">
+            <component :is="categoryIcon(preview.obj)" class="size-10 text-white/45" />
+            <p class="text-[11.5px] leading-relaxed text-white/60">{{ preview.error || '该类型不支持在线预览，请在右侧下载原文件' }}</p>
+          </div>
+
+          <button
+            v-if="items.length > 1"
+            class="absolute right-2 top-1/2 z-10 grid size-9 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white sm:right-4"
+            aria-label="下一个" @click="step(1)"
+          ><ChevronRight class="size-5" /></button>
+
+          <div class="absolute bottom-3 left-1/2 -translate-x-1/2 font-mono text-[10.5px] tracking-wide text-white/50">
+            {{ previewIndex + 1 }} / {{ items.length }}
           </div>
         </div>
-        <div class="lightbox-side-foot">
-          <button class="btn btn--primary btn--sm" @click="download(preview.obj)">下载原文件</button>
-          <button class="btn btn--sm" @click="copy(`s3://${preview.obj.bucket}/${preview.obj.objectKey}`, 'S3 URI')">复制 S3 路径</button>
-          <button v-if="preview.obj.remoteUrl" class="btn btn--quiet btn--sm" @click="copy(preview.obj.remoteUrl, '第三方 URL')">复制外链</button>
-          <button class="btn btn--quiet btn--sm" :disabled="deleting === preview.obj.id" @click="remove(preview.obj)">删除</button>
-        </div>
-      </aside>
+
+        <aside class="flex max-h-[46dvh] shrink-0 flex-col border-t border-white/10 bg-background lg:max-h-none lg:border-l lg:border-t-0">
+          <div class="border-b px-4 py-3">
+            <p class="text-[10px] font-medium tracking-[0.08em] text-muted-foreground">OBJECT DETAIL</p>
+            <h2 class="mt-1 break-words text-[15px] font-semibold leading-snug">{{ preview.obj.fileName }}</h2>
+            <p class="mt-1 text-[11px] text-muted-foreground">
+              {{ categoryLabel(preview.obj.category) }} · {{ formatBytes(preview.obj.size) }} · {{ relTime(preview.obj.createdAt) }}
+            </p>
+          </div>
+
+          <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            <dl class="space-y-2 text-[11.5px]">
+              <div v-for="row in [
+                { k: '存储桶', v: preview.obj.bucket, mono: true },
+                { k: '对象键', v: preview.obj.objectKey, mono: true },
+                { k: 'MIME', v: preview.obj.mimeType, mono: true },
+                { k: '大小', v: preview.obj.size.toLocaleString() + ' 字节', mono: true },
+                { k: '来源插件', v: preview.obj.pluginId + ' · ' + (preview.obj.provider || '—'), mono: true },
+                { k: '归档时间', v: fmtTime(preview.obj.createdAt), mono: false },
+                { k: '签名到期', v: preview.obj.urlExpireAt ? fmtTime(preview.obj.urlExpireAt) : '长期有效（本地归档）', mono: false },
+                { k: 'SHA-256', v: preview.obj.sha256, mono: true },
+              ]" :key="row.k" class="grid grid-cols-[4.5rem_1fr] gap-2">
+                <dt class="text-muted-foreground">{{ row.k }}</dt>
+                <dd :class="['break-all', row.mono && 'font-mono text-[10.5px]']">{{ row.v }}</dd>
+              </div>
+            </dl>
+
+            <div class="mt-4 space-y-2 border-t pt-3">
+              <div>
+                <p class="text-[10.5px] text-muted-foreground">第三方返回 URL</p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ preview.obj.remoteUrl || '—' }}</p>
+              </div>
+              <div>
+                <p class="text-[10.5px] text-muted-foreground">本地归档路径</p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ preview.obj.localPath || '—' }}</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2 border-t bg-muted/30 px-4 py-3">
+            <Button size="sm" @click="download(preview.obj)"><Download />下载原文件</Button>
+            <Button size="sm" variant="outline" @click="copy(`s3://${preview.obj.bucket}/${preview.obj.objectKey}`, 'S3 URI')"><Copy />复制 S3 路径</Button>
+            <Button v-if="preview.obj.remoteUrl" size="sm" variant="ghost" @click="copy(preview.obj.remoteUrl, '第三方 URL')">复制外链</Button>
+            <Button size="sm" variant="ghost" class="ml-auto text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="deleting === preview.obj.id" @click="remove(preview.obj)">
+              <Trash2 />删除
+            </Button>
+          </div>
+        </aside>
       </div>
     </Teleport>
   </div>

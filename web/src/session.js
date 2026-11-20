@@ -51,9 +51,17 @@ export function logout() {
 }
 
 export function applyTheme(theme) {
+  const dark = theme === 'dark'
+  document.documentElement.classList.toggle('dark', dark)
   document.documentElement.setAttribute('data-theme', theme)
+  document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
+  document
+    .querySelector('meta[name="theme-color"]')
+    ?.setAttribute('content', dark ? '#161513' : '#FAF9F7')
   localStorage.setItem('s3bridge.theme', theme)
 }
 export function currentTheme() {
-  return localStorage.getItem('s3bridge.theme') || 'light'
+  const saved = localStorage.getItem('s3bridge.theme')
+  if (saved === 'dark' || saved === 'light') return saved
+  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
 }

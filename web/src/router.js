@@ -23,29 +23,34 @@ export function go(name, id) {
 
 export const navGroups = [
   {
-    label: '总览',
+    label: '工作台',
     items: [
-      { name: 'overview', label: '概览', icon: '◈', perm: null },
-      { name: 'alerts', label: '告警中心', icon: '!', perm: 'plugin:read', badge: 'alerts' },
+      { name: 'overview', label: '概览', icon: 'dashboard', perm: null },
+      { name: 'alerts', label: '告警中心', icon: 'bell', perm: 'plugin:read', badge: 'alerts' },
     ],
   },
   {
-    label: '插件与上传',
+    label: '上传链路',
     items: [
-      { name: 'plugins', label: '插件管理', icon: '⊞', perm: 'plugin:read' },
-      { name: 'uploadtest', label: '上传测试', icon: '↑', perm: 'upload:write' },
-      { name: 'uploads', label: '上传列表', icon: '≡', perm: 'upload:read' },
-      { name: 'buckets', label: '存储桶', icon: '▤', perm: 'bucket:read' },
+      { name: 'plugins', label: '插件管理', icon: 'blocks', perm: 'plugin:read' },
+      { name: 'uploadtest', label: '上传测试', icon: 'upload', perm: 'upload:write' },
+      { name: 'uploads', label: '上传列表', icon: 'images', perm: 'upload:read' },
+      { name: 'buckets', label: '存储桶', icon: 'database', perm: 'bucket:read' },
     ],
   },
   {
-    label: '接入与管理',
+    label: '接入',
     items: [
-      { name: 'keys', label: 'API 密钥', icon: '⌘', perm: null },
-      { name: 'mcp', label: 'MCP 能力', icon: '◇', perm: null },
-      { name: 'docs', label: '文档中心', icon: '¶', perm: null },
-      { name: 'users', label: '用户与权限', icon: '◎', perm: 'user:manage' },
-      { name: 'settings', label: '系统设置', icon: '⚙', perm: 'system:manage' },
+      { name: 'keys', label: 'API 密钥', icon: 'key', perm: null },
+      { name: 'mcp', label: 'MCP 能力', icon: 'terminal', perm: null },
+      { name: 'docs', label: '文档中心', icon: 'book', perm: null },
+    ],
+  },
+  {
+    label: '系统',
+    items: [
+      { name: 'users', label: '用户与权限', icon: 'users', perm: 'user:manage' },
+      { name: 'settings', label: '系统设置', icon: 'settings', perm: 'system:manage' },
     ],
   },
 ]

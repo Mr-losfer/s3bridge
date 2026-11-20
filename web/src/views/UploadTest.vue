@@ -1,9 +1,20 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
-import { api, uploadFile, getToken } from '../api'
+import {
+  UploadCloud, X, Loader2, CircleCheck, Copy, ArrowRight, FileUp, Image as ImageIcon, Sparkles,
+} from 'lucide-vue-next'
+import { api, uploadFile } from '../api'
 import { notify, notifyError } from '../toast'
 import { formatBytes, fmtTime, categoryLabel } from '../utils'
 import { go } from '../router'
+import PageHeader from '../components/PageHeader.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import Input from '../components/ui/Input.vue'
+import Select from '../components/ui/Select.vue'
+import Field from '../components/ui/Field.vue'
+import Empty from '../components/ui/Empty.vue'
 
 const plugins = ref([])
 const buckets = ref([])
@@ -17,6 +28,7 @@ const uploading = ref(false)
 const progress = ref(0)
 const result = ref(null)
 const history = ref([])
+const fileInput = ref(null)
 
 const isImage = computed(() => (file.value?.type || '').startsWith('image/'))
 const canUpload = computed(() => !!file.value && !uploading.value)
@@ -76,6 +88,13 @@ function onDrop(e) {
   pick(e.dataTransfer?.files?.[0])
 }
 function onSelect(e) { pick(e.target.files?.[0]) }
+function clearFile() {
+  if (preview.value) URL.revokeObjectURL(preview.value)
+  preview.value = ''
+  file.value = null
+  result.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
 
 async function submit() {
   if (!canUpload.value) return
@@ -104,117 +123,155 @@ function copy(text, label) {
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">Upload / 测试台</div>
-        <h1 class="page-title">上传图片测试</h1>
-        <p class="page-desc">选一张图片，走真实插件链路：第三方上传 → 统一标准输出 → 按 bucket 与文件类型归档 → S3 可读取。</p>
-      </div>
-      <button class="btn" @click="go('uploads')">查看上传列表 →</button>
-    </div>
+    <PageHeader
+      title="上传图片测试"
+      description="选一张图片，走真实插件链路：第三方上传 → 统一标准输出 → 按 bucket 与文件类型归档 → S3 可读取。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="go('uploads')">查看上传列表<ArrowRight /></Button>
+      </template>
+    </PageHeader>
 
-    <div style="display:grid;grid-template-columns:minmax(0,1.1fr) minmax(300px,.9fr);gap:36px;align-items:start">
+    <div class="grid items-start gap-5 lg:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
       <div>
-        <div class="drop-zone" :class="{ 'is-over': dragging }"
+        <div
+          class="group relative flex min-h-[15rem] cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed bg-card p-6 text-center transition-colors sm:min-h-[17rem] sm:p-10"
+          :class="dragging ? 'border-primary bg-primary/[0.04]' : 'hover:border-foreground/25 hover:bg-muted/30'"
           @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="onDrop"
-          @click="$refs.fileInput?.click()">
-          <div class="drop-zone-icon">↑</div>
-          <div style="font-family:var(--serif);font-size:22px;margin-top:12px">拖放文件到这里，或点击选择</div>
-          <p class="muted tiny" style="margin:8px 0 0">支持图片、文档、音视频与压缩包；单文件上限由服务端配置决定</p>
-          <input ref="fileInput" type="file" style="display:none" @change="onSelect" />
-          <div v-if="file" class="panel" style="margin-top:22px;text-align:left;display:inline-block">
-            <div class="strong">{{ file.name }}</div>
-            <div class="mono tiny muted">{{ file.type || '未知类型' }} · {{ formatBytes(file.size) }}</div>
-          </div>
-          <img v-if="preview" :src="preview" class="preview-img" alt="预览" />
-        </div>
+          @click="fileInput?.click()"
+        >
+          <input ref="fileInput" type="file" class="hidden" @change="onSelect" />
 
-        <div class="form-grid" style="margin-top:26px">
-          <div class="field">
-            <label>目标存储桶 <span class="req">*</span></label>
-            <select v-model="bucket">
-              <option v-for="b in buckets" :key="b.name" :value="b.name">{{ b.name }}{{ b.publicRead ? '（公开读）' : '' }}</option>
-            </select>
-          </div>
-          <div class="field">
-            <label>上传插件</label>
-            <select v-model="pluginId">
-              <option value="">自动选择（按文件类型 + 权重）</option>
-              <option v-for="p in eligiblePlugins" :key="p.id" :value="p.id">{{ p.name }} · 权重 {{ p.priority }} · {{ p.status }}</option>
-            </select>
-            <div class="field-help">
-              <template v-if="category">
-                检测到 <span class="tag tag--accent">{{ categoryLabel(category) }}</span>
-                可承接插件 {{ eligiblePlugins.length }} 个<template v-if="autoPick">；自动模式会选 <strong>{{ autoPick.name }}</strong>（权重 {{ autoPick.priority }}）</template>
-              </template>
-              <template v-else>选择文件后自动按类型过滤插件</template>
+          <template v-if="!file">
+            <div class="mx-auto grid size-11 place-items-center rounded-xl border bg-muted/50 text-muted-foreground transition-transform group-hover:-translate-y-0.5">
+              <UploadCloud class="size-5" />
             </div>
-          </div>
-          <div class="field" style="grid-column:1/-1">
-            <label>对象键（可选）</label>
-            <input v-model="objectKey" placeholder="例如 images/2026/banner.png，留空自动生成" />
-            <div class="field-help">对象键会做路径穿越清洗；归档目录为 {bucket}/{文件类型}/{年月}/</div>
-          </div>
+            <p class="mt-3 text-[14px] font-medium">拖放文件到这里，或点击选择</p>
+            <p class="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">支持图片、文档、音视频与压缩包；单文件上限由服务端配置决定</p>
+          </template>
+
+          <template v-else>
+            <div class="flex flex-col items-center gap-3">
+              <img v-if="preview" :src="preview" alt="预览" class="max-h-52 max-w-full rounded-lg border object-contain" @click.stop />
+              <div v-else class="grid size-12 place-items-center rounded-xl border bg-muted/50 text-muted-foreground">
+                <FileUp class="size-5" />
+              </div>
+              <div class="min-w-0 max-w-full">
+                <p class="truncate text-[13px] font-medium">{{ file.name }}</p>
+                <p class="mt-0.5 font-mono text-[10.5px] text-muted-foreground">{{ file.type || '未知类型' }} · {{ formatBytes(file.size) }}</p>
+              </div>
+              <Button size="sm" variant="outline" @click.stop="clearFile"><X />移除文件</Button>
+            </div>
+          </template>
         </div>
 
-        <div style="margin-top:24px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
-          <button class="btn btn--primary" :disabled="!canUpload" @click="submit">
-            <span v-if="uploading" class="spinner"></span>
-            {{ uploading ? '上传中 ' + progress + '%' : '开始上传' }}
-          </button>
-          <button class="btn" :disabled="uploading" @click="file = null; preview = ''; result = null">清空</button>
-          <span v-if="uploading" class="tiny muted">正在调用插件并等待第三方响应…</span>
-        </div>
-        <div v-if="uploading" style="height:3px;background:var(--line);margin-top:16px">
-          <div style="height:100%;background:var(--accent);transition:width .2s var(--ease)" :style="{ width: progress + '%' }"></div>
-        </div>
+        <Card class="mt-4 p-4">
+          <div class="grid gap-3.5 sm:grid-cols-2">
+            <Field label="目标存储桶" required>
+              <Select v-model="bucket">
+                <option v-for="b in buckets" :key="b.name" :value="b.name">{{ b.name }}{{ b.publicRead ? '（公开读）' : '' }}</option>
+              </Select>
+            </Field>
+            <Field label="上传插件">
+              <Select v-model="pluginId">
+                <option value="">自动选择（按文件类型 + 权重）</option>
+                <option v-for="p in eligiblePlugins" :key="p.id" :value="p.id">{{ p.name }} · 权重 {{ p.priority }} · {{ p.status }}</option>
+              </Select>
+            </Field>
+            <div class="sm:col-span-2">
+              <div class="flex flex-wrap items-center gap-1.5 rounded-md border bg-muted/30 px-3 py-2 text-[11.5px] text-muted-foreground">
+                <Sparkles class="size-3.5 text-primary" />
+                <template v-if="category">
+                  检测到 <Badge variant="primary">{{ categoryLabel(category) }}</Badge>
+                  可承接插件 {{ eligiblePlugins.length }} 个<template v-if="autoPick">；自动模式会选 <strong class="text-foreground">{{ autoPick.name }}</strong>（权重 {{ autoPick.priority }}）</template>
+                </template>
+                <template v-else>选择文件后自动按类型过滤插件</template>
+              </div>
+            </div>
+            <Field label="对象键（可选）" hint="对象键会做路径穿越清洗；归档目录为 {bucket}/{文件类型}/{年月}/" class="sm:col-span-2">
+              <Input v-model="objectKey" placeholder="例如 images/2026/banner.png，留空自动生成" />
+            </Field>
+          </div>
+
+          <div class="mt-4 flex flex-wrap items-center gap-2">
+            <Button :disabled="!canUpload" @click="submit">
+              <Loader2 v-if="uploading" class="animate-spin" />
+              <UploadCloud v-else />
+              {{ uploading ? '上传中 ' + progress + '%' : '开始上传' }}
+            </Button>
+            <Button variant="outline" :disabled="uploading" @click="clearFile">清空</Button>
+            <span v-if="uploading" class="text-[11px] text-muted-foreground">正在调用插件并等待第三方响应…</span>
+          </div>
+
+          <div v-if="uploading" class="mt-3.5 h-1.5 overflow-hidden rounded-full bg-muted">
+            <div class="h-full rounded-full bg-primary transition-[width] duration-200" :style="{ width: progress + '%' }" />
+          </div>
+        </Card>
       </div>
 
-      <div>
-        <div class="section-head" style="margin-bottom:16px"><div><h2 class="section-title">标准输出</h2><p class="section-note">所有插件返回同一结构</p></div></div>
-        <div v-if="result" class="panel">
-          <div style="display:flex;justify-content:space-between;gap:10px;align-items:center;margin-bottom:16px">
-            <span class="tag tag--good">SUCCESS</span>
-            <span class="mono tiny muted">{{ result.provider }}</span>
+      <div class="space-y-4">
+        <div class="flex items-end justify-between gap-3">
+          <div>
+            <h2 class="text-sm font-semibold">标准输出</h2>
+            <p class="mt-0.5 text-[11.5px] text-muted-foreground">所有插件返回同一结构</p>
           </div>
-          <dl class="kv" style="grid-template-columns:100px 1fr">
-            <dt>文件名</dt><dd>{{ result.fileName }}</dd>
-            <dt>对象键</dt><dd class="mono" style="word-break:break-all">{{ result.objectKey }}</dd>
-            <dt>文件类型</dt><dd>{{ categoryLabel(result.category) }} · <span class="mono tiny">{{ result.mimeType }}</span></dd>
-            <dt>命中插件</dt><dd class="mono">{{ result.pluginId }} <span class="muted tiny">（{{ result.provider }}）</span></dd>
-            <dt>大小</dt><dd class="mono">{{ formatBytes(result.size) }}</dd>
-            <dt>存储桶</dt><dd class="mono">{{ result.bucket }}</dd>
-            <dt>签名到期</dt><dd>{{ result.urlExpireAt ? fmtTime(result.urlExpireAt) : '长期有效' }}</dd>
-            <dt>SHA-256</dt><dd class="mono tiny" style="word-break:break-all">{{ result.sha256 }}</dd>
-          </dl>
-          <div class="divider"></div>
-          <div class="field">
-            <label>第三方返回 URL</label>
-            <div class="field-inline">
-              <input :value="result.remoteUrl" readonly class="mono" style="font-size:11px" />
-              <button class="btn btn--sm" @click="copy(result.remoteUrl, 'URL')">复制</button>
-            </div>
-            <div class="field-help">临时签名链接可能过期；本地归档对象通过 S3 接口读取长期有效。</div>
-          </div>
-        </div>
-        <div v-else class="empty" style="border:1px solid var(--line);background:var(--surface)">
-          <div class="empty-title">等待上传</div>
-          <p>完成一次上传后，这里会显示统一标准输出与归档信息。</p>
+          <Badge variant="outline">UploadResult</Badge>
         </div>
 
-        <div v-if="history.length > 1" class="section" style="margin-top:30px">
-          <div class="section-head"><div><h2 class="section-title">本次会话记录</h2></div></div>
-          <table style="margin-top:8px">
-            <thead><tr><th>文件</th><th>类型</th><th>大小</th></tr></thead>
-            <tbody>
-              <tr v-for="(h, i) in history" :key="i">
-                <td class="tiny">{{ h.fileName }}</td>
-                <td><span class="tag">{{ categoryLabel(h.category) }}</span></td>
-                <td class="num mono tiny">{{ formatBytes(h.size) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <Card v-if="result">
+          <div class="flex items-center justify-between gap-3 border-b px-4 py-3">
+            <Badge variant="success"><CircleCheck class="size-3" />SUCCESS</Badge>
+            <span class="font-mono text-[10.5px] text-muted-foreground">{{ result.provider }}</span>
+          </div>
+          <div class="space-y-2 p-4 text-[11.5px]">
+            <div v-for="row in [
+              { k: '文件名', v: result.fileName, mono: false },
+              { k: '对象键', v: result.objectKey, mono: true },
+              { k: '文件类型', v: categoryLabel(result.category) + ' · ' + result.mimeType, mono: false },
+              { k: '命中插件', v: result.pluginId + '（' + result.provider + '）', mono: true },
+              { k: '大小', v: formatBytes(result.size), mono: true },
+              { k: '存储桶', v: result.bucket, mono: true },
+              { k: '签名到期', v: result.urlExpireAt ? fmtTime(result.urlExpireAt) : '长期有效', mono: false },
+              { k: 'SHA-256', v: result.sha256, mono: true },
+            ]" :key="row.k" class="grid grid-cols-[4.5rem_1fr] gap-2">
+              <span class="text-muted-foreground">{{ row.k }}</span>
+              <span :class="['break-all', row.mono && 'font-mono text-[10.5px]']">{{ row.v }}</span>
+            </div>
+
+            <div class="mt-3 border-t pt-3">
+              <p class="text-[10.5px] text-muted-foreground">第三方返回 URL</p>
+              <div class="mt-1 flex items-center gap-1.5">
+                <Input :model-value="result.remoteUrl" readonly class="h-8 font-mono text-[10px]" />
+                <Button size="icon-sm" variant="outline" aria-label="复制 URL" @click="copy(result.remoteUrl, 'URL')"><Copy /></Button>
+              </div>
+              <p class="mt-1 text-[10.5px] leading-relaxed text-muted-foreground">临时签名链接可能过期；本地归档对象通过 S3 接口读取长期有效。</p>
+            </div>
+          </div>
+          <div class="border-t bg-muted/30 px-4 py-3">
+            <Button size="sm" variant="outline" class="w-full" @click="go('uploads')"><ImageIcon />在上传列表中查看</Button>
+          </div>
+        </Card>
+
+        <Card v-else>
+          <Empty title="等待上传" description="完成一次上传后，这里会显示统一标准输出与归档信息。">
+            <div class="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              <UploadCloud class="size-3.5" />拖入文件即可开始
+            </div>
+          </Empty>
+        </Card>
+
+        <Card v-if="history.length > 1" class="overflow-hidden">
+          <div class="border-b px-4 py-2.5">
+            <p class="text-[12px] font-medium">本次会话记录</p>
+          </div>
+          <div class="divide-y">
+            <div v-for="(h, i) in history" :key="i" class="flex items-center gap-3 px-4 py-2">
+              <span class="min-w-0 flex-1 truncate text-[11.5px]">{{ h.fileName }}</span>
+              <Badge variant="outline">{{ categoryLabel(h.category) }}</Badge>
+              <span class="font-mono text-[10.5px] text-muted-foreground">{{ formatBytes(h.size) }}</span>
+            </div>
+          </div>
+        </Card>
       </div>
     </div>
   </div>

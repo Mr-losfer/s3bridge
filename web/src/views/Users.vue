@@ -1,9 +1,25 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import {
+  UserPlus, RefreshCw, ShieldCheck, KeyRound, Pencil, UserX, UserCheck, Users as UsersIcon,
+  Check, Loader2,
+} from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { fmtTime, relTime } from '../utils'
 import { session } from '../session'
+import PageHeader from '../components/PageHeader.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import Input from '../components/ui/Input.vue'
+import Field from '../components/ui/Field.vue'
+import Select from '../components/ui/Select.vue'
+import Switch from '../components/ui/Switch.vue'
+import Sheet from '../components/ui/Sheet.vue'
+import Dialog from '../components/ui/Dialog.vue'
+import Empty from '../components/ui/Empty.vue'
+import Skeleton from '../components/ui/Skeleton.vue'
 
 const users = ref([])
 const allPerms = ref([])
@@ -151,153 +167,193 @@ async function resetPassword() {
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">Access / 用户与权限</div>
-        <h1 class="page-title">用户与权限</h1>
-        <p class="page-desc">基于角色的访问控制（RBAC）：角色给出默认权限，再按用户逐项授予或撤销。每个用户用独立的 API Key 访问 S3。</p>
-      </div>
-      <div class="btn-group">
-        <button class="btn" @click="load">↻ 刷新</button>
-        <button class="btn btn--primary" @click="openCreate">＋ 新建用户</button>
-      </div>
-    </div>
+    <PageHeader
+      title="用户与权限"
+      description="基于角色的访问控制（RBAC）：角色给出默认权限，再按用户逐项授予或撤销。每个用户用独立的 API Key 访问 S3。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
+        <Button @click="openCreate"><UserPlus />新建用户</Button>
+      </template>
+    </PageHeader>
 
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">账号列表</h2><p class="section-note">共 {{ users.length }} 个账号 · 禁用后无法登录</p></div></div>
-      <div class="table-wrap" style="margin-top:18px">
-        <table>
-          <thead><tr><th>用户</th><th>角色</th><th>状态</th><th>有效权限</th><th>最近登录</th><th>创建时间</th><th></th></tr></thead>
+    <Card class="overflow-hidden">
+      <div class="flex items-center justify-between gap-3 border-b px-4 py-3">
+        <div>
+          <h2 class="text-sm font-semibold">账号列表</h2>
+          <p class="mt-0.5 text-[11.5px] text-muted-foreground">共 {{ users.length }} 个账号 · 禁用后无法登录</p>
+        </div>
+        <Badge variant="outline"><UsersIcon class="size-3" />RBAC</Badge>
+      </div>
+
+      <div v-if="loading" class="space-y-2 p-4"><Skeleton v-for="i in 3" :key="i" class="h-12" /></div>
+
+      <div v-else class="hidden overflow-x-auto md:block">
+        <table class="data-table">
+          <thead><tr><th>用户</th><th>角色</th><th>状态</th><th class="hidden lg:table-cell">有效权限</th><th class="hidden xl:table-cell">最近登录</th><th class="hidden xl:table-cell">创建时间</th><th class="w-44"></th></tr></thead>
           <tbody>
-            <tr v-for="u in users" :key="u.id" :class="{ 'is-unhealthy': u.disabled }">
+            <tr v-for="u in users" :key="u.id" :class="u.disabled && 'opacity-55'">
               <td>
-                <div class="cell-main">{{ u.displayName || u.username }} <span v-if="u.id === session.user?.id" class="tag tag--accent">我</span></div>
-                <div class="cell-sub mono">{{ u.username }} · {{ u.id }}</div>
+                <div class="flex items-center gap-2 font-medium">
+                  {{ u.displayName || u.username }}
+                  <Badge v-if="u.id === session.user?.id" variant="primary">我</Badge>
+                </div>
+                <div class="mt-0.5 font-mono text-[10px] text-muted-foreground">{{ u.username }} · {{ u.id }}</div>
               </td>
-              <td><span class="tag" :class="u.role === 'admin' ? 'tag--accent' : ''">{{ roleLabels[u.role] || u.role }}</span></td>
-              <td><span class="status" :class="u.disabled ? 'status--disabled' : 'status--healthy'">{{ u.disabled ? '已禁用' : '正常' }}</span></td>
-              <td style="max-width:340px">
-                <div class="inline-list">
-                  <span v-for="p in (u.permissions || []).slice(0, 6)" :key="p" class="tag">{{ permLabel(p) }}</span>
-                  <span v-if="(u.permissions || []).length > 6" class="tag">+{{ u.permissions.length - 6 }}</span>
-                  <span v-if="!(u.permissions || []).length" class="muted tiny">无权限</span>
+              <td><Badge :variant="u.role === 'admin' ? 'primary' : 'outline'">{{ roleLabels[u.role] || u.role }}</Badge></td>
+              <td><Badge :variant="u.disabled ? 'outline' : 'success'">{{ u.disabled ? '已禁用' : '正常' }}</Badge></td>
+              <td class="hidden max-w-[20rem] lg:table-cell">
+                <div class="flex flex-wrap gap-1">
+                  <Badge v-for="p in (u.permissions || []).slice(0, 5)" :key="p" variant="outline">{{ permLabel(p) }}</Badge>
+                  <Badge v-if="(u.permissions || []).length > 5" variant="outline">+{{ u.permissions.length - 5 }}</Badge>
+                  <span v-if="!(u.permissions || []).length" class="text-[11px] text-muted-foreground">无权限</span>
                 </div>
               </td>
-              <td class="muted tiny nowrap">{{ u.lastLoginAt ? relTime(u.lastLoginAt) : '从未登录' }}</td>
-              <td class="muted tiny nowrap">{{ fmtTime(u.createdAt) }}</td>
+              <td class="hidden whitespace-nowrap text-[11px] text-muted-foreground xl:table-cell">{{ u.lastLoginAt ? relTime(u.lastLoginAt) : '从未登录' }}</td>
+              <td class="hidden whitespace-nowrap text-[11px] text-muted-foreground xl:table-cell">{{ fmtTime(u.createdAt) }}</td>
               <td>
-                <div class="row-actions">
-                  <button class="btn btn--sm" @click="openEdit(u)">编辑</button>
-                  <button class="btn btn--quiet btn--sm" @click="openPassword(u)">重置密码</button>
-                  <button v-if="u.disabled" class="btn btn--quiet btn--sm" :disabled="busy === u.id" @click="enable(u)">启用</button>
-                  <button v-else class="btn btn--quiet btn--sm" :disabled="busy === u.id" @click="disable(u)">禁用</button>
+                <div class="flex items-center justify-end gap-1">
+                  <Button size="sm" variant="outline" @click="openEdit(u)"><Pencil />编辑</Button>
+                  <Button size="sm" variant="ghost" @click="openPassword(u)"><KeyRound /></Button>
+                  <Button v-if="u.disabled" size="icon-sm" variant="ghost" aria-label="启用" :disabled="busy === u.id" @click="enable(u)"><UserCheck /></Button>
+                  <Button v-else size="icon-sm" variant="ghost" aria-label="禁用" class="text-muted-foreground hover:text-destructive" :disabled="busy === u.id" @click="disable(u)"><UserX /></Button>
                 </div>
               </td>
             </tr>
-            <tr v-if="loading"><td colspan="7"><div class="empty"><span class="spinner"></span> 正在加载…</div></td></tr>
           </tbody>
         </table>
       </div>
-    </div>
 
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">角色与默认权限</h2><p class="section-note">修改角色后可在用户编辑页逐项调整</p></div></div>
-      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:18px">
-        <div v-for="r in ['admin','editor','viewer']" :key="r" class="panel">
-          <div class="strong" style="font-family:var(--serif);font-size:19px">{{ roleLabels[r] }} <span class="mono tiny muted">{{ r }}</span></div>
-          <p class="tiny muted" style="margin:6px 0 14px">{{ roleNote[r] }}</p>
-          <div class="inline-list">
-            <span v-for="p in (defaults[r] || [])" :key="p" class="tag">{{ permLabel(p) }}</span>
+      <div v-if="!loading" class="divide-y md:hidden">
+        <div v-for="u in users" :key="u.id" class="p-3.5" :class="u.disabled && 'opacity-55'">
+          <div class="flex items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5">
+                <p class="truncate text-[13px] font-medium">{{ u.displayName || u.username }}</p>
+                <Badge v-if="u.id === session.user?.id" variant="primary">我</Badge>
+              </div>
+              <p class="mt-0.5 truncate font-mono text-[10px] text-muted-foreground">{{ u.username }} · {{ u.id }}</p>
+            </div>
+            <div class="flex shrink-0 gap-1">
+              <Badge :variant="u.role === 'admin' ? 'primary' : 'outline'">{{ roleLabels[u.role] || u.role }}</Badge>
+              <Badge :variant="u.disabled ? 'outline' : 'success'">{{ u.disabled ? '已禁用' : '正常' }}</Badge>
+            </div>
+          </div>
+          <div class="mt-2 flex flex-wrap gap-1">
+            <Badge v-for="p in (u.permissions || []).slice(0, 4)" :key="p" variant="outline">{{ permLabel(p) }}</Badge>
+            <Badge v-if="(u.permissions || []).length > 4" variant="outline">+{{ u.permissions.length - 4 }}</Badge>
+          </div>
+          <div class="mt-2.5 flex items-center gap-1.5 border-t pt-2.5">
+            <Button size="sm" variant="outline" class="flex-1" @click="openEdit(u)"><Pencil />编辑</Button>
+            <Button size="sm" variant="ghost" @click="openPassword(u)"><KeyRound />密码</Button>
+            <Button v-if="u.disabled" size="sm" variant="ghost" :disabled="busy === u.id" @click="enable(u)"><UserCheck />启用</Button>
+            <Button v-else size="sm" variant="ghost" class="text-muted-foreground" :disabled="busy === u.id" @click="disable(u)"><UserX />禁用</Button>
           </div>
         </div>
       </div>
+    </Card>
+
+    <div class="mt-6">
+      <h2 class="text-sm font-semibold">角色与默认权限</h2>
+      <p class="mt-0.5 text-[11.5px] text-muted-foreground">修改角色后可在用户编辑页逐项调整。</p>
+      <div class="mt-3 grid gap-3 sm:grid-cols-3">
+        <Card v-for="r in ['admin', 'editor', 'viewer']" :key="r" class="p-4">
+          <div class="flex items-center justify-between gap-2">
+            <p class="text-[13px] font-semibold">{{ roleLabels[r] }}</p>
+            <Badge variant="outline">{{ r }}</Badge>
+          </div>
+          <p class="mt-1 text-[11px] leading-relaxed text-muted-foreground">{{ roleNote[r] }}</p>
+          <div class="mt-2.5 flex flex-wrap gap-1">
+            <Badge v-for="p in (defaults[r] || [])" :key="p" variant="outline">{{ permLabel(p) }}</Badge>
+          </div>
+        </Card>
+      </div>
     </div>
 
-    <!-- 用户编辑抽屉 -->
-    <template v-if="drawer">
-      <div class="drawer-backdrop" @click="drawer = false"></div>
-      <aside class="drawer">
-        <div class="drawer-head">
+    <!-- 用户编辑 -->
+    <Sheet v-model:open="drawer" :title="editing ? '编辑用户' : '新建用户'" description="最终权限 = 角色默认 + 额外授予 − 撤销。" class="max-w-xl">
+      <div class="grid gap-4 sm:grid-cols-2">
+        <Field label="登录名" required><Input v-model="form.username" :disabled="editing" placeholder="例如 alice" /></Field>
+        <Field label="显示名"><Input v-model="form.displayName" placeholder="留空则同登录名" /></Field>
+        <Field v-if="!editing" label="初始密码" required hint="至少 8 位"><Input v-model="form.password" type="password" placeholder="至少 8 位" /></Field>
+        <Field label="角色" :hint="roleNote[form.role]">
+          <Select v-model="form.role">
+            <option value="admin">admin — 管理员</option>
+            <option value="editor">editor — 编辑</option>
+            <option value="viewer">viewer — 只读</option>
+          </Select>
+        </Field>
+        <div v-if="editing" class="flex items-center justify-between gap-3 rounded-lg border px-3 py-2.5 sm:col-span-2">
           <div>
-            <div class="eyebrow">User</div>
-            <h2 class="section-title">{{ editing ? '编辑用户' : '新建用户' }}</h2>
-            <p class="section-note">最终权限 = 角色默认 + 额外授予 − 撤销</p>
+            <p class="text-[12.5px] font-medium">禁用该账号</p>
+            <p class="text-[11px] text-muted-foreground">立即无法登录，已有 API Key 同时失效</p>
           </div>
-          <button class="icon-btn" @click="drawer = false">✕</button>
+          <Switch v-model="form.disabled" />
         </div>
-        <div class="drawer-body">
-          <div class="form-grid">
-            <div class="field">
-              <label>登录名 <span class="req">*</span></label>
-              <input v-model="form.username" :disabled="editing" placeholder="例如 alice" />
-            </div>
-            <div class="field">
-              <label>显示名</label>
-              <input v-model="form.displayName" placeholder="留空则同登录名" />
-            </div>
-            <div v-if="!editing" class="field">
-              <label>初始密码 <span class="req">*</span></label>
-              <input v-model="form.password" type="password" placeholder="至少 8 位" />
-            </div>
-            <div class="field">
-              <label>角色</label>
-              <select v-model="form.role">
-                <option value="admin">admin — 管理员</option>
-                <option value="editor">editor — 编辑</option>
-                <option value="viewer">viewer — 只读</option>
-              </select>
-              <div class="field-help">{{ roleNote[form.role] }}</div>
-            </div>
-            <div v-if="editing" class="field" style="grid-column:1/-1">
-              <label>账号状态</label>
-              <div class="checkbox-row"><input type="checkbox" v-model="form.disabled" /><span>禁用该账号（立即无法登录）</span></div>
-            </div>
-          </div>
+      </div>
 
-          <div class="field-group">
-            <h3 class="field-group-title">权限矩阵</h3>
-            <p class="section-note" style="margin-bottom:16px">「额外授予」补充角色没有的权限，「撤销」移除角色已有的权限。两项互斥。</p>
-            <div class="table-wrap">
-              <table>
-                <thead><tr><th>权限</th><th class="right">额外授予</th><th class="right">撤销</th><th class="right">最终</th></tr></thead>
-                <tbody>
-                  <tr v-for="p in allPerms" :key="p">
-                    <td><span class="mono tiny">{{ p }}</span><div class="cell-sub">{{ permLabel(p) }}</div></td>
-                    <td class="right"><input type="checkbox" :checked="(form.extraPerms || []).includes(p)" @change="togglePerm(p, 'extra')" style="accent-color:var(--accent)" /></td>
-                    <td class="right"><input type="checkbox" :checked="(form.revokedPerms || []).includes(p)" @change="togglePerm(p, 'revoke')" style="accent-color:var(--accent)" /></td>
-                    <td class="right"><span :class="effectivePerms.includes(p) ? 'tag tag--good' : 'tag'">{{ effectivePerms.includes(p) ? '✓' : '—' }}</span></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <p class="tiny muted" style="margin-top:12px">最终生效 {{ effectivePerms.length }} 项：{{ effectivePerms.map(permLabel).join('、') || '无' }}</p>
-          </div>
+      <div class="mt-5">
+        <div class="flex items-center gap-2">
+          <ShieldCheck class="size-4 text-muted-foreground" />
+          <h3 class="text-[13px] font-semibold">权限矩阵</h3>
         </div>
-        <div class="drawer-foot">
-          <button class="btn" @click="drawer = false">取消</button>
-          <button class="btn btn--primary" :disabled="saving" @click="save">{{ saving ? '保存中…' : editing ? '保存修改' : '创建用户' }}</button>
+        <p class="mt-1 text-[11px] leading-relaxed text-muted-foreground">「额外授予」补充角色没有的权限，「撤销」移除角色已有的权限。两项互斥。</p>
+        <div class="mt-2.5 overflow-hidden rounded-lg border">
+          <table class="w-full text-[11.5px]">
+            <thead class="bg-muted/40 text-muted-foreground">
+              <tr class="border-b">
+                <th class="px-2.5 py-2 text-left font-medium">权限</th>
+                <th class="w-14 px-1 py-2 text-center font-medium">授予</th>
+                <th class="w-14 px-1 py-2 text-center font-medium">撤销</th>
+                <th class="w-14 px-1 py-2 text-center font-medium">最终</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="p in allPerms" :key="p" class="border-b last:border-0">
+                <td class="px-2.5 py-1.5">
+                  <span class="font-mono text-[10px]">{{ p }}</span>
+                  <span class="ml-1.5 text-muted-foreground">{{ permLabel(p) }}</span>
+                </td>
+                <td class="px-1 py-1.5 text-center">
+                  <input type="checkbox" class="size-3.5 accent-[var(--primary)]" :checked="(form.extraPerms || []).includes(p)" @change="togglePerm(p, 'extra')" />
+                </td>
+                <td class="px-1 py-1.5 text-center">
+                  <input type="checkbox" class="size-3.5 accent-[var(--primary)]" :checked="(form.revokedPerms || []).includes(p)" @change="togglePerm(p, 'revoke')" />
+                </td>
+                <td class="px-1 py-1.5 text-center">
+                  <span :class="effectivePerms.includes(p) ? 'inline-grid size-4 place-items-center rounded-full bg-success/15 text-success' : 'text-muted-foreground/40'">
+                    <Check v-if="effectivePerms.includes(p)" class="size-2.5" :stroke-width="3" />
+                    <template v-else>—</template>
+                  </span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-      </aside>
-    </template>
+        <p class="mt-2 text-[11px] text-muted-foreground">最终生效 {{ effectivePerms.length }} 项：{{ effectivePerms.map(permLabel).join('、') || '无' }}</p>
+      </div>
+
+      <template #footer>
+        <Button variant="outline" @click="drawer = false">取消</Button>
+        <Button :disabled="saving" @click="save">
+          <Loader2 v-if="saving" class="animate-spin" />{{ saving ? '保存中…' : editing ? '保存修改' : '创建用户' }}
+        </Button>
+      </template>
+    </Sheet>
 
     <!-- 重置密码 -->
-    <template v-if="pwdTarget">
-      <div class="drawer-backdrop" @click="pwdTarget = null"></div>
-      <div style="position:fixed;inset:0;z-index:62;display:grid;place-items:center;padding:24px;pointer-events:none">
-        <div class="panel" style="pointer-events:auto;width:min(430px,100%)">
-          <div class="eyebrow">Reset Password</div>
-          <h2 class="section-title" style="margin:6px 0 4px">重置密码 · {{ pwdTarget.username }}</h2>
-          <p class="section-note" style="margin-bottom:20px">新密码将立即生效，用户下次登录需使用新密码。</p>
-          <div class="field">
-            <label>新密码 <span class="req">*</span></label>
-            <input v-model="pwd" type="password" placeholder="至少 8 位" @keyup.enter="resetPassword" />
-          </div>
-          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:24px">
-            <button class="btn" @click="pwdTarget = null">取消</button>
-            <button class="btn btn--primary" :disabled="saving" @click="resetPassword">确认重置</button>
-          </div>
-        </div>
-      </div>
-    </template>
+    <Dialog
+      :open="!!pwdTarget" :title="`重置密码 · ${pwdTarget?.username || ''}`"
+      description="新密码将立即生效，用户下次登录需使用新密码。"
+      @update:open="(v) => { if (!v) pwdTarget = null }"
+    >
+      <Field label="新密码" required hint="至少 8 位">
+        <Input v-model="pwd" type="password" placeholder="至少 8 位" @keyup.enter="resetPassword" />
+      </Field>
+      <template #footer>
+        <Button variant="outline" @click="pwdTarget = null">取消</Button>
+        <Button :disabled="saving" @click="resetPassword">{{ saving ? '提交中…' : '确认重置' }}</Button>
+      </template>
+    </Dialog>
   </div>
 </template>

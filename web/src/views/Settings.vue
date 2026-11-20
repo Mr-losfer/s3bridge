@@ -1,9 +1,22 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2 } from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { can } from '../session'
-import { fmtTime, formatBytes, statusText } from '../utils'
+import { fmtTime, formatBytes } from '../utils'
+import PageHeader from '../components/PageHeader.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import CardHeader from '../components/ui/CardHeader.vue'
+import CardTitle from '../components/ui/CardTitle.vue'
+import CardDescription from '../components/ui/CardDescription.vue'
+import CardContent from '../components/ui/CardContent.vue'
+import Input from '../components/ui/Input.vue'
+import Field from '../components/ui/Field.vue'
+import Select from '../components/ui/Select.vue'
+import Switch from '../components/ui/Switch.vue'
 
 const settings = ref(null)
 const site = ref(null)
@@ -65,89 +78,115 @@ async function changePassword() {
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">System / 系统设置</div>
-        <h1 class="page-title">系统设置</h1>
-        <p class="page-desc">站点标识、默认插件、健康检测总开关与告警策略。修改检测开关会立即重建调度器。</p>
-      </div>
-      <button class="btn" @click="load">↻ 刷新</button>
-    </div>
+    <PageHeader
+      title="系统设置"
+      description="站点标识、默认插件、健康检测总开关与告警策略。修改检测开关会立即重建调度器。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
+      </template>
+    </PageHeader>
 
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">基本设置</h2><p class="section-note">对应 MCP 工具 system_settings_get / system_settings_update</p></div></div>
-      <div class="panel" style="margin-top:18px">
-        <div class="form-grid">
-          <div class="field">
-            <label>站点名称</label>
-            <input v-model="form.siteName" :disabled="!canManage" />
-          </div>
-          <div class="field">
-            <label>默认上传插件</label>
-            <select v-model="form.defaultPlugin" :disabled="!canManage">
+    <Card>
+      <CardHeader class="pb-4">
+        <div class="flex items-center gap-2">
+          <ShieldCheck class="size-4 text-muted-foreground" />
+          <CardTitle>基本设置</CardTitle>
+        </div>
+        <CardDescription>对应 MCP 工具 system_settings_get / system_settings_update</CardDescription>
+      </CardHeader>
+      <CardContent class="border-t pt-4">
+        <div class="grid gap-4 sm:grid-cols-2">
+          <Field label="站点名称"><Input v-model="form.siteName" :disabled="!canManage" /></Field>
+          <Field label="默认上传插件" hint="未指定插件的上传请求会使用该插件">
+            <Select v-model="form.defaultPlugin" :disabled="!canManage">
               <option value="">自动选择（健康优先）</option>
-              <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }} · {{ p.id }} · {{ statusText(p.status) }}</option>
-            </select>
-            <div class="field-help">未指定插件的上传请求会使用该插件</div>
-          </div>
-          <div class="field" style="grid-column:1/-1">
-            <label>站点公告</label>
-            <textarea v-model="form.announcement" :disabled="!canManage" placeholder="展示给所有用户的提示（可留空）"></textarea>
-          </div>
+              <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }} · {{ p.id }} · {{ p.status }}</option>
+            </Select>
+          </Field>
+          <Field label="站点公告" class="sm:col-span-2">
+            <textarea
+              v-model="form.announcement" :disabled="!canManage" placeholder="展示给所有用户的提示（可留空）"
+              class="flex min-h-20 w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-[13px] shadow-xs placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25 disabled:opacity-50"
+            />
+          </Field>
         </div>
 
-        <div class="field-group">
-          <h3 class="field-group-title">健康检测与告警</h3>
-          <p class="section-note" style="margin-bottom:16px">全局总开关；每个插件还可在插件列表里单独配置间隔、超时、失败阈值与探活模式。</p>
-          <div class="form-grid">
-            <div class="field">
-              <label>定时检测总开关</label>
-              <div class="checkbox-row"><input type="checkbox" v-model="form.healthEnabled" :disabled="!canManage" /><span>启用后台自动探活</span></div>
+        <div class="mt-5 border-t pt-4">
+          <p class="text-[13px] font-semibold">健康检测与告警</p>
+          <p class="mt-0.5 text-[11.5px] text-muted-foreground">全局总开关；每个插件还可在插件列表里单独配置间隔、超时、失败阈值与探活模式。</p>
+          <div class="mt-3 grid gap-3 sm:grid-cols-3">
+            <div class="flex items-start justify-between gap-3 rounded-lg border px-3 py-3">
+              <div>
+                <p class="text-[12px] font-medium">定时检测</p>
+                <p class="mt-0.5 text-[11px] text-muted-foreground">启用后台自动探活</p>
+              </div>
+              <Switch v-model="form.healthEnabled" :disabled="!canManage" class="mt-0.5 shrink-0" />
             </div>
-            <div class="field">
-              <label>全局默认间隔（秒）</label>
-              <input v-model.number="form.healthIntervalSecs" type="number" min="10" :disabled="!canManage" />
-              <div class="field-help">最小 10 秒，插件级配置优先</div>
-            </div>
-            <div class="field">
-              <label>异常时生成告警</label>
-              <div class="checkbox-row"><input type="checkbox" v-model="form.alertOnFailure" :disabled="!canManage" /><span>连续失败达阈值时写入告警中心</span></div>
-              <div class="field-help">异常插件会在列表置顶并标红</div>
+            <Field label="全局默认间隔（秒）" hint="最小 10 秒，插件级配置优先">
+              <Input v-model.number="form.healthIntervalSecs" type="number" min="10" :disabled="!canManage" />
+            </Field>
+            <div class="flex items-start justify-between gap-3 rounded-lg border px-3 py-3">
+              <div>
+                <p class="text-[12px] font-medium">异常时生成告警</p>
+                <p class="mt-0.5 text-[11px] text-muted-foreground">连续失败达阈值时写入告警中心</p>
+              </div>
+              <Switch v-model="form.alertOnFailure" :disabled="!canManage" class="mt-0.5 shrink-0" />
             </div>
           </div>
         </div>
 
-        <div style="display:flex;justify-content:flex-end;gap:9px;margin-top:26px;padding-top:20px;border-top:1px solid var(--line)">
-          <button class="btn" @click="load">重置</button>
-          <button class="btn btn--primary" :disabled="!canManage || saving || loading" @click="save">{{ saving ? '保存中…' : '保存设置' }}</button>
+        <div class="mt-5 flex justify-end gap-2 border-t pt-4">
+          <Button variant="outline" @click="load">重置</Button>
+          <Button :disabled="!canManage || saving || loading" @click="save">
+            <Loader2 v-if="saving" class="animate-spin" /><Save v-else />{{ saving ? '保存中…' : '保存设置' }}
+          </Button>
         </div>
-      </div>
-    </div>
+      </CardContent>
+    </Card>
 
-    <div style="display:grid;grid-template-columns:minmax(0,1.2fr) minmax(300px,.8fr);gap:22px" class="section">
-      <div>
-        <div class="section-head"><div><h2 class="section-title">站点信息</h2><p class="section-note">只读，与 MCP 的 site_info 一致</p></div></div>
-        <div class="panel" style="margin-top:18px">
-          <dl class="kv">
-            <dt>名称 / 版本</dt><dd>{{ site?.siteName }} · <span class="mono">{{ site?.version }}</span></dd>
-            <dt>启动时间</dt><dd>{{ fmtTime(site?.startedAt) }}（已运行 {{ site?.uptime }}）</dd>
-            <dt>规模</dt><dd>{{ site?.plugins }} 插件 · {{ site?.users }} 用户 · {{ site?.buckets }} 桶 · {{ site?.objects }} 对象（{{ formatBytes(site?.totalBytes) }}）</dd>
-            <dt>健康状态</dt><dd><span class="tag tag--good">{{ site?.healthyPlugins }} 正常</span> <span class="tag tag--warn">{{ site?.unhealthyPlugins }} 异常</span> <span class="tag">{{ site?.openAlerts }} 未处理告警</span></dd>
-            <dt>S3 接入点</dt><dd><code class="code">{{ site?.s3Endpoint }}</code> · region <code class="code">{{ site?.s3Region }}</code></dd>
-            <dt>调度器</dt><dd class="mono tiny" style="word-break:break-all">{{ JSON.stringify(site?.scheduler || {}) }}</dd>
-          </dl>
-        </div>
-      </div>
+    <div class="mt-5 grid gap-4 lg:grid-cols-[1.2fr_0.8fr]">
+      <Card>
+        <CardHeader class="pb-3">
+          <div class="flex items-center gap-2"><Info class="size-4 text-muted-foreground" /><CardTitle>站点信息</CardTitle></div>
+          <CardDescription>只读，与 MCP 的 site_info 一致</CardDescription>
+        </CardHeader>
+        <CardContent class="space-y-2.5 border-t pt-4 text-[11.5px]">
+          <div v-for="row in [
+            { k: '名称 / 版本', v: (site?.siteName || '—') + ' · ' + (site?.version || '—'), mono: false },
+            { k: '启动时间', v: fmtTime(site?.startedAt) + '（已运行 ' + (site?.uptime || '—') + '）', mono: false },
+            { k: '规模', v: `${site?.plugins} 插件 · ${site?.users} 用户 · ${site?.buckets} 桶 · ${site?.objects} 对象（${formatBytes(site?.totalBytes)}）`, mono: false },
+            { k: '健康状态', v: '', mono: false },
+            { k: 'S3 接入点', v: (site?.s3Endpoint || '—') + ' · ' + (site?.s3Region || '—'), mono: true },
+            { k: '调度器', v: JSON.stringify(site?.scheduler || {}), mono: true },
+          ]" :key="row.k" class="grid gap-0.5 sm:grid-cols-[6.5rem_1fr] sm:gap-3">
+            <span class="text-muted-foreground">{{ row.k }}</span>
+            <div v-if="row.k === '健康状态'" class="flex flex-wrap gap-1">
+              <Badge variant="success">{{ site?.healthyPlugins }} 正常</Badge>
+              <Badge variant="warning">{{ site?.unhealthyPlugins }} 异常</Badge>
+              <Badge variant="outline">{{ site?.openAlerts }} 未处理告警</Badge>
+            </div>
+            <span v-else :class="['break-words', row.mono && 'font-mono text-[10.5px]']">{{ row.v }}</span>
+          </div>
+        </CardContent>
+      </Card>
 
-      <div>
-        <div class="section-head"><div><h2 class="section-title">修改我的密码</h2><p class="section-note">仅影响当前登录账号</p></div></div>
-        <div class="panel" style="margin-top:18px">
-          <div class="field" style="margin-bottom:16px"><label>原密码</label><input v-model="pwd.oldPassword" type="password" autocomplete="current-password" /></div>
-          <div class="field" style="margin-bottom:16px"><label>新密码</label><input v-model="pwd.newPassword" type="password" autocomplete="new-password" /><div class="field-help">至少 8 位</div></div>
-          <div class="field" style="margin-bottom:20px"><label>确认新密码</label><input v-model="pwd.confirm" type="password" autocomplete="new-password" @keyup.enter="changePassword" /></div>
-          <button class="btn btn--primary btn--block" :disabled="pwdSaving" @click="changePassword">{{ pwdSaving ? '提交中…' : '修改密码' }}</button>
-        </div>
-      </div>
+      <Card>
+        <CardHeader class="pb-3">
+          <div class="flex items-center gap-2"><KeyRound class="size-4 text-muted-foreground" /><CardTitle>修改我的密码</CardTitle></div>
+          <CardDescription>仅影响当前登录账号</CardDescription>
+        </CardHeader>
+        <CardContent class="border-t pt-4">
+          <div class="grid gap-3">
+            <Field label="原密码"><Input v-model="pwd.oldPassword" type="password" autocomplete="current-password" /></Field>
+            <Field label="新密码" hint="至少 8 位"><Input v-model="pwd.newPassword" type="password" autocomplete="new-password" /></Field>
+            <Field label="确认新密码"><Input v-model="pwd.confirm" type="password" autocomplete="new-password" @keyup.enter="changePassword" /></Field>
+            <Button class="mt-1 w-full" :disabled="pwdSaving" @click="changePassword">
+              <Loader2 v-if="pwdSaving" class="animate-spin" />{{ pwdSaving ? '提交中…' : '修改密码' }}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   </div>
 </template>

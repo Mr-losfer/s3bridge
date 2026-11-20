@@ -1,9 +1,24 @@
 <script setup>
 import { ref, onMounted, computed, watch } from 'vue'
+import {
+  KeyRound, Plus, RefreshCw, Eye, EyeOff, Copy, TerminalSquare, Wrench, BookOpen,
+  ShieldCheck, Server, ChevronRight, Search, Loader2, Play, ExternalLink, CircleCheck,
+} from 'lucide-vue-next'
 import { api, mcpRPC } from '../api'
 import { notify, notifyError } from '../toast'
 import { go } from '../router'
 import { session } from '../session'
+import PageHeader from '../components/PageHeader.vue'
+import StatCard from '../components/StatCard.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import Input from '../components/ui/Input.vue'
+import Select from '../components/ui/Select.vue'
+import Field from '../components/ui/Field.vue'
+import CodeBlock from '../components/CodeBlock.vue'
+import Empty from '../components/ui/Empty.vue'
+import Skeleton from '../components/ui/Skeleton.vue'
 
 const tools = ref([])
 const resources = ref([])
@@ -15,6 +30,7 @@ const running = ref(false)
 const output = ref('')
 const outputIsError = ref(false)
 const copied = ref('')
+const toolQuery = ref('')
 
 // 当前登录用户的 API Key：列表 + 按需解密后的完整凭据
 const myKeys = ref([])
@@ -39,7 +55,10 @@ const groups = computed(() => {
     return { ...g, items }
   })
   if (rest.size) out.push({ key: 'other', label: '其他', hint: '', items: tools.value.filter((t) => rest.has(t.name)) })
-  return out.filter((g) => g.items.length)
+  return out
+    .filter((g) => g.items.length)
+    .map((g) => ({ ...g, items: g.items.filter((t) => !toolQuery.value.trim() || (t.name + ' ' + t.description).toLowerCase().includes(toolQuery.value.trim().toLowerCase())) }))
+    .filter((g) => g.items.length)
 })
 
 const currentTool = computed(() => tools.value.find((t) => t.name === selectedTool.value))
@@ -189,165 +208,216 @@ const desktopConfig = computed(() => `{
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">MCP / Model Context Protocol</div>
-        <h1 class="page-title">MCP 能力</h1>
-        <p class="page-desc">后台每个按钮都对应一个 MCP 工具：AI 客户端可执行站点查看、插件文档、开发调试、差量与全量修改、插件更新、参数修改等全部操作，结果与审计记录完全一致。</p>
-      </div>
-      <div class="btn-group">
-        <button class="btn" @click="load">↻ 刷新</button>
-        <button class="btn" @click="go('docs', 'mcp')">完整文档 →</button>
-      </div>
-    </div>
+    <PageHeader
+      title="MCP 能力"
+      description="后台每个按钮都对应一个 MCP 工具：AI 客户端可执行站点查看、插件文档、开发调试、差量与全量修改、插件更新、参数修改等全部操作，结果与审计记录完全一致。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
+        <Button variant="ghost" @click="go('docs', 'mcp')"><BookOpen />完整文档<ExternalLink /></Button>
+      </template>
+    </PageHeader>
 
-    <!-- 当前登录用户的 API Key：明文 + 已填好真实凭据的对接代码 -->
-    <div class="section">
-      <div class="section-head">
-        <div>
-          <h2 class="section-title">当前登录用户的 API Key</h2>
-          <p class="section-note">下方代码已自动填入 <strong>{{ session.user?.displayName || session.user?.username || '当前账号' }}</strong> 的真实密钥，复制即可使用；无需另找地方生成，随时可回来查看。</p>
+    <!-- 当前用户 API Key -->
+    <Card class="overflow-hidden">
+      <div class="flex flex-col gap-3 border-b p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <KeyRound class="size-4 text-muted-foreground" />
+            <h2 class="text-sm font-semibold">当前登录用户的 API Key</h2>
+            <Badge variant="primary">{{ session.user?.displayName || session.user?.username }}</Badge>
+          </div>
+          <p class="mt-1 text-[11.5px] leading-relaxed text-muted-foreground">
+            下方代码已自动填入真实密钥，复制即可使用；无需另找地方生成，随时可回来查看。
+          </p>
         </div>
-        <div class="btn-group">
-          <button class="btn btn--sm" :disabled="keyLoading" @click="loadKeys">↻ 刷新密钥</button>
-          <button class="btn btn--sm" @click="go('keys')">管理密钥 →</button>
+        <div class="flex shrink-0 items-center gap-1.5">
+          <Button size="sm" variant="ghost" :disabled="keyLoading" @click="loadKeys"><RefreshCw />刷新密钥</Button>
+          <Button size="sm" variant="outline" @click="go('keys')">管理密钥<ChevronRight /></Button>
         </div>
       </div>
-      <div class="panel" style="margin-top:18px">
-        <div v-if="keyDetail">
-          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:18px">
-            <span class="tag tag--good">归属：{{ session.user?.username }}</span>
-            <select v-model="selectedKeyId" style="max-width:280px" @change="selectKey">
-              <option v-for="k in myKeys" :key="k.id" :value="k.id">{{ k.name }} · {{ k.id }}</option>
-            </select>
-            <span class="status" :class="keyDetail.revoked ? 'status--disabled' : 'status--healthy'">{{ keyDetail.revoked ? '已撤销' : '有效' }}</span>
-            <button class="btn btn--quiet btn--sm" @click="showKey = !showKey">{{ showKey ? '隐藏明文' : '显示明文' }}</button>
-            <button class="btn btn--sm" :disabled="creatingKey" @click="createKey">＋ 新建密钥</button>
-            <span v-if="keyLoading" class="spinner"></span>
-          </div>
-          <dl class="kv" style="grid-template-columns:175px 1fr">
-            <dt>API Key / Bearer</dt>
-            <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <span>{{ showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••' }}</span>
-              <button class="btn btn--sm" @click="copy(keyDetail.secretAccessKey, 'mcp-token')">{{ copied === 'mcp-token' ? '已复制' : '复制' }}</button>
-            </dd>
-            <dt>AccessKeyId</dt>
-            <dd class="mono" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <span>{{ keyDetail.accessKeyId }}</span>
-              <button class="btn btn--sm" @click="copy(keyDetail.accessKeyId, 'mcp-access')">{{ copied === 'mcp-access' ? '已复制' : '复制' }}</button>
-            </dd>
-            <dt>SecretAccessKey</dt>
-            <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <span>{{ showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••' }}</span>
-              <button class="btn btn--sm" @click="copy(keyDetail.secretAccessKey, 'mcp-secret')">{{ copied === 'mcp-secret' ? '已复制' : '复制' }}</button>
-            </dd>
-          </dl>
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin:22px 0 10px">
-            <div class="eyebrow">一键接入代码（已填入真实密钥）</div>
-            <button class="btn btn--sm" @click="copy(envExample, 'mcp-env')">{{ copied === 'mcp-env' ? '已复制' : '复制全部' }}</button>
-          </div>
-          <pre class="codeblock"><code>{{ envExample }}</code></pre>
-          <p class="tiny muted" style="margin:12px 0 0">明文由服务端 AES-256-GCM 加密保存，仅本人或管理员登录后按需解密；下方 HTTP / stdio 示例也已自动替换为这把密钥。</p>
-        </div>
-        <div v-else class="empty">
-          <div class="empty-title">当前账号还没有 API Key</div>
-          <p>点一下即可创建，随后这里会直接显示明文与现成的 MCP 对接代码。</p>
-          <button class="btn btn--primary btn--sm" :disabled="creatingKey || keyLoading" @click="createKey">
-            {{ creatingKey ? '创建中…' : '立即创建 API Key' }}
-          </button>
-        </div>
-      </div>
-    </div>
 
-    <div class="metrics" style="grid-template-columns:repeat(4,1fr)">
-      <div class="metric"><div class="metric-label">工具数量</div><div class="metric-value">{{ tools.length }}<span class="metric-unit">tools</span></div><div class="metric-foot">tools/list 实时返回</div></div>
-      <div class="metric"><div class="metric-label">文档资源</div><div class="metric-value">{{ resources.length }}<span class="metric-unit">resources</span></div><div class="metric-foot">resources/read 可读取</div></div>
-      <div class="metric"><div class="metric-label">协议版本</div><div class="metric-value" style="font-size:26px">2024-11-05</div><div class="metric-foot">JSON-RPC 2.0</div></div>
-      <div class="metric"><div class="metric-label">HTTP 端点</div><div class="metric-value" style="font-size:26px">POST /mcp</div><div class="metric-foot">另支持 stdio 独立进程</div></div>
+      <div v-if="keyDetail" class="p-4">
+        <div class="flex flex-wrap items-center gap-2">
+          <Select v-model="selectedKeyId" class="w-full sm:w-64" @update:model-value="selectKey">
+            <option v-for="k in myKeys" :key="k.id" :value="k.id">{{ k.name }} · {{ k.id }}</option>
+          </Select>
+          <Badge :variant="keyDetail.revoked ? 'outline' : 'success'">{{ keyDetail.revoked ? '已撤销' : '有效' }}</Badge>
+          <Button size="sm" variant="ghost" @click="showKey = !showKey">
+            <component :is="showKey ? EyeOff : Eye" />{{ showKey ? '隐藏明文' : '显示明文' }}
+          </Button>
+          <Button size="sm" variant="outline" :disabled="creatingKey" @click="createKey"><Plus />新建密钥</Button>
+          <Loader2 v-if="keyLoading" class="size-3.5 animate-spin text-muted-foreground" />
+        </div>
+
+        <div class="mt-3 grid gap-2.5 text-[11.5px]">
+          <div v-for="row in [
+            { k: 'API Key / Bearer', v: showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••', label: 'mcp-token' },
+            { k: 'AccessKeyId', v: keyDetail.accessKeyId, label: 'mcp-access' },
+            { k: 'SecretAccessKey', v: showKey ? keyDetail.secretAccessKey : '••••••••••••••••••••••••', label: 'mcp-secret' },
+          ]" :key="row.k" class="grid gap-1 sm:grid-cols-[9rem_1fr] sm:items-center sm:gap-2">
+            <span class="text-muted-foreground">{{ row.k }}</span>
+            <div class="flex min-w-0 items-center gap-1.5">
+              <code class="min-w-0 flex-1 break-all rounded border bg-muted/40 px-2 py-1 font-mono text-[10.5px]">{{ row.v }}</code>
+              <Button size="icon-sm" variant="outline" aria-label="复制" @click="copy(row.v.startsWith('•') ? '' : row.v, row.label)">
+                <component :is="copied === row.label ? CircleCheck : Copy" />
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <div class="mb-1.5 flex items-center justify-between">
+            <p class="text-[10.5px] font-medium tracking-wide text-muted-foreground">一键接入代码（已填入真实密钥）</p>
+            <Button size="sm" variant="ghost" class="h-6 px-1.5 text-[10.5px]" @click="copy(envExample, 'mcp-env')"><Copy />复制全部</Button>
+          </div>
+          <CodeBlock :code="envExample" label="env" max-height="240px" />
+          <p class="mt-2 text-[10.5px] leading-relaxed text-muted-foreground">
+            明文由服务端 AES-256-GCM 加密保存，仅本人或管理员登录后按需解密；下方 HTTP / stdio 示例也已自动替换为这把密钥。
+          </p>
+        </div>
+      </div>
+
+      <div v-else-if="!keyLoading" class="p-4">
+        <Empty title="当前账号还没有 API Key" description="点一下即可创建，随后这里会直接显示明文与现成的 MCP 对接代码。">
+          <Button size="sm" :disabled="creatingKey" @click="createKey"><Plus />{{ creatingKey ? '创建中…' : '立即创建 API Key' }}</Button>
+        </Empty>
+      </div>
+      <div v-else class="space-y-2 p-4"><Skeleton class="h-8" /><Skeleton class="h-24" /></div>
+    </Card>
+
+    <div class="mt-5 grid grid-cols-2 gap-3 lg:grid-cols-4">
+      <StatCard label="工具数量" :value="tools.length" unit="tools" hint="tools/list 实时返回" :icon="Wrench" />
+      <StatCard label="文档资源" :value="resources.length" unit="resources" hint="resources/read 可读取" :icon="BookOpen" />
+      <StatCard label="协议版本" value="2024-11-05" hint="JSON-RPC 2.0" :icon="ShieldCheck" value-class="text-lg sm:text-2xl" />
+      <StatCard label="HTTP 端点" value="POST /mcp" hint="另支持 stdio 独立进程" :icon="Server" value-class="text-lg sm:text-2xl" />
     </div>
 
     <!-- 在线调试台 -->
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">工具在线调试</h2><p class="section-note">直接调用 tools/call，参数为 JSON 对象；权限与后台一致</p></div></div>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;margin-top:18px">
-        <div class="panel">
-          <div class="field" style="margin-bottom:16px">
-            <label>选择工具</label>
-            <select v-model="selectedTool" @change="choose(selectedTool)">
+    <div class="mt-6">
+      <div class="mb-3 flex flex-wrap items-end justify-between gap-2">
+        <div>
+          <h2 class="text-sm font-semibold">工具在线调试</h2>
+          <p class="mt-0.5 text-[11.5px] text-muted-foreground">直接调用 tools/call，参数为 JSON 对象；权限与后台一致。</p>
+        </div>
+        <Badge variant="outline">tools/call</Badge>
+      </div>
+
+      <div class="grid gap-4 xl:grid-cols-2">
+        <Card class="min-w-0 p-4">
+          <Field label="选择工具">
+            <Select :model-value="selectedTool" @update:model-value="(v) => { selectedTool = v; choose(v) }">
               <option v-for="t in tools" :key="t.name" :value="t.name">{{ t.name }}</option>
-            </select>
-            <div class="field-help">{{ currentTool?.description }}</div>
+            </Select>
+          </Field>
+          <p class="mt-1.5 min-h-[2.4em] text-[11px] leading-relaxed text-muted-foreground">{{ currentTool?.description }}</p>
+
+          <Field label="Arguments（JSON）" class="mt-3">
+            <textarea
+              v-model="argsText" spellcheck="false"
+              class="min-h-[190px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[11.5px] leading-relaxed shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+            />
+          </Field>
+          <p class="mt-1.5 text-[11px] text-muted-foreground">必填：{{ (currentTool?.inputSchema?.required || []).join(', ') || '无' }}</p>
+
+          <div class="mt-3 flex items-center justify-end gap-2">
+            <Button size="sm" variant="ghost" @click="choose(selectedTool)"><RefreshCw />重置示例</Button>
+            <Button size="sm" :disabled="running || !selectedTool" @click="run">
+              <Loader2 v-if="running" class="animate-spin" />
+              <Play v-else />
+              {{ running ? '执行中…' : '执行调用' }}
+            </Button>
           </div>
-          <div class="field">
-            <label>Arguments（JSON）</label>
-            <textarea v-model="argsText" style="min-height:190px" spellcheck="false"></textarea>
-            <div class="field-help">
-              必填：{{ (currentTool?.inputSchema?.required || []).join(', ') || '无' }}
+        </Card>
+
+        <Card class="min-w-0 p-4">
+          <div class="mb-2 flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <Badge :variant="outputIsError ? 'destructive' : 'success'">{{ outputIsError ? 'ERROR' : 'RESULT' }}</Badge>
+              <span class="font-mono text-[10.5px] text-muted-foreground">{{ selectedTool }}</span>
             </div>
+            <Button v-if="output" size="sm" variant="ghost" @click="copy(output, '结果')"><Copy />复制</Button>
           </div>
-          <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
-            <button class="btn" @click="choose(selectedTool)">重置示例</button>
-            <button class="btn btn--primary" :disabled="running || !selectedTool" @click="run">
-              <span v-if="running" class="spinner"></span>{{ running ? '执行中…' : '执行调用' }}
-            </button>
-          </div>
-        </div>
-        <div class="panel" :style="outputIsError ? 'border-color:var(--accent)' : ''">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px">
-            <span class="tag" :class="outputIsError ? 'tag--accent' : 'tag--good'">{{ outputIsError ? 'ERROR' : 'RESULT' }}</span>
-            <button v-if="output" class="btn btn--quiet btn--sm" @click="copy(output, '结果')">复制结果</button>
-          </div>
-          <pre class="codeblock" style="margin:0;min-height:280px;max-height:460px">{{ output || '// 点击「执行调用」查看工具返回的 JSON\n// 结果来自 MCP Server，与后台页面同源' }}</pre>
-        </div>
+          <CodeBlock :code="output || '// 点击「执行调用」查看工具返回的 JSON\n// 结果来自 MCP Server，与后台页面同源'" label="response" max-height="380px" />
+        </Card>
       </div>
     </div>
 
     <!-- 工具清单 -->
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">工具清单</h2><p class="section-note">按能力分组，点击行可载入调试台</p></div></div>
-      <div v-for="g in groups" :key="g.key" style="margin-top:22px">
-        <div style="display:flex;align-items:baseline;gap:12px;margin-bottom:10px">
-          <h3 class="field-group-title" style="font-size:17px;margin:0">{{ g.label }}</h3>
-          <span class="tiny muted">{{ g.hint }} · {{ g.items.length }} 个工具</span>
+    <div class="mt-6">
+      <div class="mb-3 flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <h2 class="text-sm font-semibold">工具清单</h2>
+          <p class="mt-0.5 text-[11.5px] text-muted-foreground">按能力分组，点击行可载入调试台。</p>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th style="width:230px">工具名</th><th>说明</th><th style="width:230px">必填参数</th><th style="width:60px"></th></tr></thead>
-            <tbody>
-              <tr v-for="t in g.items" :key="t.name" class="is-clickable" @click="jumpToTool(t.name)">
-                <td class="mono tiny strong">{{ t.name }}</td>
-                <td class="tiny">{{ t.description }}</td>
-                <td class="mono tiny muted">{{ (t.inputSchema?.required || []).join(', ') || '—' }}</td>
-                <td class="right"><span class="muted">→</span></td>
-              </tr>
-            </tbody>
-          </table>
+        <div class="relative w-full sm:w-64">
+          <Search class="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input v-model="toolQuery" placeholder="搜索工具名或说明" class="h-8 pl-8 text-xs" />
         </div>
       </div>
-      <div v-if="loading" class="empty"><span class="spinner"></span> 正在加载工具…</div>
+
+      <div v-if="loading" class="space-y-2"><Skeleton v-for="i in 5" :key="i" class="h-24 rounded-xl" /></div>
+      <div v-else class="space-y-3">
+        <Card v-for="g in groups" :key="g.key" class="overflow-hidden">
+          <div class="flex flex-wrap items-center gap-2 border-b bg-muted/25 px-4 py-2.5">
+            <h3 class="text-[12.5px] font-semibold">{{ g.label }}</h3>
+            <span class="text-[10.5px] text-muted-foreground">{{ g.hint }}</span>
+            <Badge variant="outline" class="ml-auto">{{ g.items.length }}</Badge>
+          </div>
+          <div class="divide-y">
+            <button
+              v-for="t in g.items" :key="t.name"
+              class="group flex w-full items-start gap-3 px-4 py-2.5 text-left transition-colors hover:bg-muted/40"
+              @click="jumpToTool(t.name)"
+            >
+              <span class="mt-0.5 min-w-0 flex-1">
+                <span class="block font-mono text-[11px] font-medium text-foreground">{{ t.name }}</span>
+                <span class="mt-0.5 block text-[11px] leading-relaxed text-muted-foreground">{{ t.description }}</span>
+                <span v-if="(t.inputSchema?.required || []).length" class="mt-1 block font-mono text-[10px] text-muted-foreground/80">
+                  必填：{{ (t.inputSchema.required || []).join(', ') }}
+                </span>
+              </span>
+              <ChevronRight class="mt-1 size-3.5 shrink-0 text-muted-foreground/40 transition-transform group-hover:translate-x-0.5 group-hover:text-muted-foreground" />
+            </button>
+          </div>
+        </Card>
+        <Card v-if="!groups.length">
+          <Empty title="没有匹配的工具" description="换个关键词试试。" />
+        </Card>
+      </div>
     </div>
 
     <!-- 接入配置 -->
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">接入配置</h2><p class="section-note">HTTP 直连或 stdio 独立进程，二选一 · 代码中的密钥已按上方选中的密钥自动填写</p></div></div>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;margin-top:18px">
-        <div>
-          <div class="eyebrow" style="margin-bottom:10px">HTTP / Streamable HTTP</div>
-          <pre class="codeblock"><code>{{ httpExample }}</code></pre>
+    <div class="mt-6">
+      <div class="mb-3">
+        <h2 class="text-sm font-semibold">接入配置</h2>
+        <p class="mt-0.5 text-[11.5px] text-muted-foreground">HTTP 直连或 stdio 独立进程，二选一 · 代码中的密钥已按上方选中的密钥自动填写。</p>
+      </div>
+      <div class="grid gap-4 xl:grid-cols-2">
+        <div class="min-w-0">
+          <p class="mb-1.5 text-[10.5px] font-medium tracking-wide text-muted-foreground">HTTP / STREAMABLE HTTP</p>
+          <CodeBlock :code="httpExample" label="curl" max-height="220px" />
         </div>
-        <div>
-          <div class="eyebrow" style="margin-bottom:10px">Claude Desktop / Cursor（stdio）</div>
-          <pre class="codeblock"><code>{{ desktopConfig }}</code></pre>
+        <div class="min-w-0">
+          <p class="mb-1.5 text-[10.5px] font-medium tracking-wide text-muted-foreground">CLAUDE DESKTOP / CURSOR（STDIO）</p>
+          <CodeBlock :code="desktopConfig" label="mcp.json" max-height="220px" />
         </div>
       </div>
-      <div class="panel" style="margin-top:18px">
-        <div class="eyebrow" style="margin-bottom:10px">文档资源（resources/list）</div>
-        <div class="inline-list">
-          <span v-for="r in resources" :key="r.uri" class="tag" :title="r.description">{{ r.uri }}</span>
-          <span v-if="!resources.length" class="muted tiny">暂无资源</span>
+
+      <Card class="mt-4 p-4">
+        <div class="flex items-center gap-2">
+          <BookOpen class="size-4 text-muted-foreground" />
+          <p class="text-[10.5px] font-medium tracking-wide text-muted-foreground">文档资源（resources/list）</p>
         </div>
-        <p class="tiny muted" style="margin:12px 0 0">工具需要鉴权：HTTP 端点使用 <code class="code">Authorization: Bearer &lt;API Key&gt;</code>，stdio 模式通过 <code class="code">S3BRIDGE_TOKEN</code> 环境变量传入。当前账号的密钥明文与可复制代码就在本页顶部，也可在「API 密钥」页面随时查看或新建。</p>
-      </div>
+        <div class="mt-2 flex flex-wrap gap-1.5">
+          <Badge v-for="r in resources" :key="r.uri" variant="outline" :title="r.description">{{ r.uri }}</Badge>
+          <span v-if="!resources.length" class="text-[11px] text-muted-foreground">暂无资源</span>
+        </div>
+        <p class="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+          工具需要鉴权：HTTP 端点使用 <code class="rounded border bg-muted px-1 py-px font-mono text-[10px]">Authorization: Bearer &lt;API Key&gt;</code>，
+          stdio 模式通过 <code class="rounded border bg-muted px-1 py-px font-mono text-[10px]">S3BRIDGE_TOKEN</code> 环境变量传入。
+        </p>
+      </Card>
     </div>
   </div>
 </template>

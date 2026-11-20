@@ -1,9 +1,30 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import {
+  Play, Radar, Save, Eye, EyeOff, RotateCw, Check, Trash2, Download,
+  SlidersHorizontal, Code2, History, BookOpen, CircleAlert, Timer, FileJson,
+} from 'lucide-vue-next'
 import { api } from '../api'
 import { route, go } from '../router'
 import { notify, notifyError } from '../toast'
 import { relTime, fmtTime, renderMarkdown, truncate, categoryLabels, categoryLabel } from '../utils'
+import PageHeader from '../components/PageHeader.vue'
+import StatusBadge from '../components/StatusBadge.vue'
+import CodeBlock from '../components/CodeBlock.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import CardHeader from '../components/ui/CardHeader.vue'
+import CardTitle from '../components/ui/CardTitle.vue'
+import CardDescription from '../components/ui/CardDescription.vue'
+import CardContent from '../components/ui/CardContent.vue'
+import Input from '../components/ui/Input.vue'
+import Field from '../components/ui/Field.vue'
+import Select from '../components/ui/Select.vue'
+import Switch from '../components/ui/Switch.vue'
+import Tabs from '../components/ui/Tabs.vue'
+import TabContent from '../components/ui/TabContent.vue'
+import Empty from '../components/ui/Empty.vue'
 
 const id = computed(() => route.value.id)
 const view = ref(null)
@@ -48,6 +69,15 @@ const expiryHint = computed(() => {
   if (left < 86400000) return '将在 ' + Math.round(left / 3600000) + ' 小时后过期'
   return '有效期至 ' + t.toLocaleString('zh-CN')
 })
+
+const tabItems = [
+  { value: 'params', label: '参数配置', icon: SlidersHorizontal },
+  { value: 'debug', label: '调试与检测', icon: Radar },
+  { value: 'source', label: '插件源码', icon: Code2 },
+  { value: 'advanced', label: '差量 / 全量', icon: FileJson },
+  { value: 'changes', label: '变更记录', icon: History },
+  { value: 'docs', label: '插件文档', icon: BookOpen },
+]
 
 function initForm(v) {
   const f = {}
@@ -210,276 +240,335 @@ function switchTab(t) {
 
 <template>
   <div>
-    <div class="page-head">
+    <PageHeader
+      :title="view?.name || id"
+      :description="view?.description || '插件详情与参数配置'"
+      back="plugins"
+      back-label="插件列表"
+    >
+      <template #actions>
+        <StatusBadge :status="view?.status || 'unknown'" />
+        <Badge variant="primary">权重 {{ view?.priority ?? '—' }}</Badge>
+        <Badge variant="outline">{{ currentTypes.join(' / ') }}</Badge>
+        <Badge variant="outline">v{{ view?.version }}</Badge>
+        <Badge variant="outline">rev {{ view?.revision }}</Badge>
+      </template>
+    </PageHeader>
+
+    <div v-if="view?.warning" class="mb-4 flex items-start gap-2.5 rounded-xl border border-warning/25 bg-warning/[0.07] p-3.5">
+      <Timer class="mt-0.5 size-4 shrink-0 text-warning" />
       <div>
-        <div class="eyebrow">Plugins / <button class="btn btn--quiet btn--sm" style="padding:0" @click="go('plugins')">返回列表</button> / {{ id }}</div>
-        <h1 class="page-title">{{ view?.name || id }}</h1>
-        <p class="page-desc">{{ view?.description || '插件详情与参数配置' }}</p>
-      </div>
-      <div class="btn-group">
-        <span class="status" :class="'status--' + (view?.status || 'unknown')">{{ view?.status || 'unknown' }}</span>
-        <span class="tag">权重 {{ view?.priority ?? '—' }}</span>
-        <span class="tag">{{ currentTypes.join(' / ') }}</span>
-        <span class="tag">v{{ view?.version }}</span>
-        <span class="tag">revision {{ view?.revision }}</span>
+        <p class="text-[12.5px] font-medium text-warning">临时参数提醒</p>
+        <p class="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">{{ view.warning }}</p>
       </div>
     </div>
-
-    <div v-if="view?.warning" class="alert-strip">
-      <div style="font-family:var(--serif);font-size:22px;line-height:1;color:var(--accent)">!</div>
-      <div><div class="alert-strip-title">临时参数提醒</div><div class="alert-strip-body">{{ view.warning }}</div></div>
-    </div>
-    <div v-if="view?.statusMessage" class="panel" style="margin-bottom:22px;padding:13px 18px">
-      <span class="tiny muted">最近状态</span>
-      <div style="font-size:13px;margin-top:3px">{{ view.statusMessage }} <span class="muted tiny">· {{ relTime(view.lastCheckedAt) }} · {{ view.latencyMs }}ms</span></div>
+    <div v-if="view?.statusMessage" class="mb-4 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border bg-card px-3.5 py-2.5 text-[12px]">
+      <span class="text-[10.5px] text-muted-foreground">最近状态</span>
+      <span>{{ view.statusMessage }}</span>
+      <span class="text-[10.5px] text-muted-foreground">· {{ relTime(view.lastCheckedAt) }} · {{ view.latencyMs }}ms</span>
     </div>
 
-    <div class="tabs">
-      <button v-for="t in [
-        { k: 'params', l: '参数配置' }, { k: 'debug', l: '调试与检测' },
-        { k: 'source', l: '插件源码' },
-        { k: 'advanced', l: '差量 / 全量 / 更新' }, { k: 'changes', l: '变更记录' }, { k: 'docs', l: '插件文档' },
-      ]" :key="t.k" class="tab" :class="{ 'is-active': tab === t.k }" @click="switchTab(t.k)">{{ t.l }}</button>
-    </div>
+    <Tabs :model-value="tab" :items="tabItems" @update:model-value="switchTab">
+      <!-- 参数配置 -->
+      <TabContent value="params">
+        <div class="grid gap-4">
+          <Card>
+            <CardHeader class="pb-4">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <CardTitle>调度设置</CardTitle>
+                  <CardDescription class="mt-1">上传时先判定文件类型，再在同类型插件中按权重从高到低选择；同权重时更健康的插件优先。</CardDescription>
+                </div>
+                <Badge variant="primary">{{ currentTypes.join(' / ') }}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent class="grid gap-4 border-t pt-4 sm:grid-cols-[10rem_1fr]">
+              <Field label="调度权重" hint="数值越大越优先；列表按权重降序即为实际调度顺序">
+                <Input v-model.number="schedule.priority" type="number" min="0" max="9999" step="10" />
+              </Field>
+              <Field label="可承接文件类型" hint="不勾选表示全部类型；例如只勾选「图片」后，文档与压缩包会自动路由到其他插件。">
+                <div class="flex flex-wrap gap-1.5">
+                  <button
+                    v-for="[key, label] in fileTypeOptions" :key="key" type="button"
+                    class="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs transition-colors"
+                    :class="schedule.fileTypes.includes(key)
+                      ? 'border-primary/40 bg-primary/[0.08] font-medium text-primary'
+                      : 'bg-background text-muted-foreground hover:border-foreground/25 hover:text-foreground'"
+                    @click="toggleScheduleType(key)"
+                  >
+                    <Check v-if="schedule.fileTypes.includes(key)" class="size-3" />
+                    {{ label }}
+                  </button>
+                </div>
+              </Field>
+              <div class="flex flex-wrap items-center gap-2 sm:col-span-2">
+                <Button size="sm" :disabled="scheduleSaving" @click="saveSchedule">
+                  <Save />{{ scheduleSaving ? '保存中…' : '保存调度设置' }}
+                </Button>
+                <span class="text-[11px] text-muted-foreground">也可用 MCP 的 plugin_patch 设置 priority / fileTypes</span>
+              </div>
+            </CardContent>
+          </Card>
 
-    <!-- 参数配置 -->
-    <div v-if="tab === 'params'">
-      <div class="panel schedule-panel">
-        <div class="section-head" style="margin:0 0 18px">
-          <div>
-            <h2 class="section-title">调度设置</h2>
-            <p class="section-note">上传时先判定文件类型，再在同类型插件中按权重从高到低选择；同权重时更健康的插件优先</p>
-          </div>
-          <span class="tag">{{ currentTypes.join(' / ') }}</span>
-        </div>
-        <div class="form-grid" style="align-items:start">
-          <div class="field">
-            <label>调度权重</label>
-            <input type="number" min="0" max="9999" step="10" v-model.number="schedule.priority" />
-            <div class="field-help">数值越大越优先；列表按权重降序即为实际调度顺序</div>
-          </div>
-          <div class="field" style="grid-column:2/-1">
-            <div class="field-label">可承接文件类型</div>
-            <div class="chip-checks">
-              <label v-for="[key, label] in fileTypeOptions" :key="key" class="chip-check" :class="{ 'is-on': schedule.fileTypes.includes(key) }">
-                <input type="checkbox" :checked="schedule.fileTypes.includes(key)" @change="toggleScheduleType(key)" />
-                <span>{{ label }}</span>
-              </label>
+          <Card v-for="g in (view?.grouped || [])" :key="g.name">
+            <CardHeader class="pb-4">
+              <CardTitle>{{ g.name || '通用' }}</CardTitle>
+              <CardDescription>清单定义的配置项，按类型自动渲染</CardDescription>
+            </CardHeader>
+            <CardContent class="grid gap-4 border-t pt-4 sm:grid-cols-2">
+              <Field
+                v-for="f in g.fields" :key="f.key"
+                :label="f.label" :required="f.required" :hint="f.help"
+                :class="f.type === 'textarea' && 'sm:col-span-2'"
+              >
+                <template #default>
+                  <div class="flex items-center gap-1.5">
+                    <Badge v-if="f.volatile" variant="warning">临时</Badge>
+                    <Badge v-if="f.sensitive" variant="outline">加密</Badge>
+                    <span class="font-mono text-[10px] text-muted-foreground">{{ f.key }}</span>
+                  </div>
+                  <div v-if="f.type === 'bool'" class="flex items-center gap-2 py-1.5">
+                    <Switch :model-value="form[f.key] === 'true'" @update:model-value="form[f.key] = $event ? 'true' : 'false'" />
+                    <span class="text-xs text-muted-foreground">{{ f.help || '启用' }}</span>
+                  </div>
+                  <Select v-else-if="f.type === 'select'" v-model="form[f.key]">
+                    <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
+                  </Select>
+                  <textarea
+                    v-else-if="f.type === 'textarea'" v-model="form[f.key]" :placeholder="f.placeholder || f.help"
+                    class="flex min-h-24 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[12px] leading-relaxed shadow-xs placeholder:text-muted-foreground/70 focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+                  />
+                  <div v-else class="flex gap-1.5">
+                    <Input
+                      v-model="form[f.key]"
+                      :type="f.sensitive && !showSecret[f.key] ? 'password' : (f.type === 'number' || f.type === 'duration' ? 'number' : 'text')"
+                      :placeholder="f.sensitive && view?.params?.[f.key] ? '已保存：' + view.params[f.key] + '（留空表示不修改）' : (f.placeholder || f.help || '')"
+                      :min="f.type === 'number' ? 0 : undefined"
+                    />
+                    <Button v-if="f.sensitive" variant="outline" size="icon" :aria-label="showSecret[f.key] ? '隐藏' : '显示'" @click="showSecret[f.key] = !showSecret[f.key]">
+                      <component :is="showSecret[f.key] ? EyeOff : Eye" />
+                    </Button>
+                  </div>
+                  <p v-if="volatileField && f.key === volatileField.expiresField" class="mt-1 flex items-center gap-1 text-[11.5px] text-warning">
+                    <Timer class="size-3.5" />{{ expiryHint }}
+                  </p>
+                </template>
+              </Field>
+            </CardContent>
+          </Card>
+
+          <div v-if="volatileField" class="flex flex-col gap-3 rounded-xl border border-warning/25 bg-warning/[0.06] p-3.5 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <p class="text-[12.5px] font-medium">临时凭据助手</p>
+              <p class="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+                粘贴 Bearer Token 后一键解析 exp / sub，自动回填过期时间与 X-User-Id。{{ expiryHint }}
+              </p>
             </div>
-            <div class="field-help">不勾选表示全部类型；例如只勾选「图片」后，文档与压缩包会自动路由到其他插件</div>
+            <Button size="sm" variant="outline" class="shrink-0" @click="parseToken"><RotateCw />从 Token 解析</Button>
+          </div>
+
+          <div v-if="fields.length" class="flex flex-wrap items-center gap-2">
+            <Button :disabled="saving" @click="saveParams"><Save />{{ saving ? '保存中…' : '保存参数配置' }}</Button>
+            <Button variant="outline" @click="load"><RotateCw />重新载入</Button>
+            <span class="text-[11.5px] text-muted-foreground">敏感字段留空表示保持原值；服务端以 AES-256-GCM 加密存储。</span>
           </div>
         </div>
-        <div style="margin-top:16px;display:flex;gap:9px;align-items:center">
-          <button class="btn btn--primary btn--sm" :disabled="scheduleSaving" @click="saveSchedule">{{ scheduleSaving ? '保存中…' : '保存调度设置' }}</button>
-          <span class="tiny muted">也可用 MCP 的 <code class="code">plugin_patch</code> 设置 priority / fileTypes</span>
+      </TabContent>
+
+      <!-- 调试与检测 -->
+      <TabContent value="debug">
+        <div class="flex flex-wrap items-center gap-2">
+          <Button @click="runDebug"><Play />运行插件调试</Button>
+          <Button variant="outline" @click="runCheck"><Radar />立即健康检测</Button>
         </div>
-      </div>
+        <p class="mt-3 text-[11.5px] leading-relaxed text-muted-foreground">
+          调试不会上传真实文件：依次检查参数合法性、临时凭据有效期与上游连通性。
+        </p>
 
-      <div v-for="g in (view?.grouped || [])" :key="g.name" class="field-group">
-        <h2 class="field-group-title">{{ g.name || '通用' }}</h2>
-        <p class="section-note" style="margin-bottom:20px">清单定义的配置项，按类型自动渲染</p>
-        <div class="form-grid">
-          <div v-for="f in g.fields" :key="f.key" class="field" :style="f.type === 'textarea' ? 'grid-column:1/-1' : ''">
-            <label>
-              {{ f.label }} <span v-if="f.required" class="req">*</span>
-              <span v-if="f.volatile" class="tag tag--warn">临时</span>
-              <span v-if="f.sensitive" class="tag">加密</span>
-              <span class="mono" style="color:var(--muted);font-size:10px;text-transform:none;letter-spacing:0">{{ f.key }}</span>
-            </label>
-
-            <div v-if="f.type === 'bool'" class="checkbox-row" style="padding:8px 0">
-              <input type="checkbox" :checked="form[f.key] === 'true'" @change="form[f.key] = $event.target.checked ? 'true' : 'false'" />
-              <span>{{ f.help || '启用' }}</span>
+        <Card v-if="debugReport" class="mt-4 overflow-hidden">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-[13px] font-medium">诊断结果</span>
+              <span class="font-mono text-[10.5px] text-muted-foreground">v{{ debugReport.version }} · {{ fmtTime(debugReport.checkedAt) }}</span>
             </div>
-            <select v-else-if="f.type === 'select'" v-model="form[f.key]">
-              <option v-for="o in f.options" :key="o.value" :value="o.value">{{ o.label }}</option>
-            </select>
-            <textarea v-else-if="f.type === 'textarea'" v-model="form[f.key]" :placeholder="f.placeholder || f.help"></textarea>
-            <div v-else class="field-inline">
-              <input
-                v-model="form[f.key]"
-                :type="f.sensitive && !showSecret[f.key] ? 'password' : (f.type === 'number' || f.type === 'duration' ? 'number' : 'text')"
-                :placeholder="f.sensitive && view?.params?.[f.key] ? '已保存：' + view.params[f.key] + '（留空表示不修改）' : (f.placeholder || f.help || '')"
-                :min="f.type === 'number' ? 0 : undefined"
+            <Badge :variant="debugReport.healthy ? 'success' : 'destructive'">{{ debugReport.healthy ? 'PASS' : 'FAIL' }}</Badge>
+          </div>
+          <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>步骤</th><th class="w-20">结论</th><th>详情</th><th class="w-20 text-right">耗时</th></tr></thead>
+              <tbody>
+                <tr v-for="(s, i) in debugReport.steps" :key="i">
+                  <td class="font-medium">{{ s.name }}</td>
+                  <td>
+                    <Badge :variant="s.status === 'pass' ? 'success' : s.status === 'warn' ? 'warning' : 'destructive'">{{ s.status.toUpperCase() }}</Badge>
+                  </td>
+                  <td class="max-w-[34rem] text-[11.5px] leading-relaxed text-muted-foreground">
+                    <span class="break-words">{{ s.detail }}</span>
+                  </td>
+                  <td class="text-right font-mono text-[11px]">{{ s.durationMs }}ms</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Card>
+        <Card v-else class="mt-4">
+          <Empty title="尚未运行调试" description="点击上方按钮，三步诊断插件配置与上游链路。">
+            <Button size="sm" @click="runDebug"><Play />开始诊断</Button>
+          </Empty>
+        </Card>
+      </TabContent>
+
+      <!-- 插件源码 -->
+      <TabContent value="source">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div class="min-w-0">
+            <h2 class="text-sm font-semibold">声明式插件源码</h2>
+            <p class="mt-1 max-w-3xl text-[11.5px] leading-relaxed text-muted-foreground">
+              一份 JSON 定义参数 Schema、请求模板与响应映射；保存后立即编译生效、无需重启，与 MCP 的 plugin_code_* 工具完全同源。
+            </p>
+          </div>
+          <div class="flex items-center gap-1.5">
+            <Badge :variant="source?.editable ? 'success' : 'warning'">{{ source?.editable ? '可编辑' : '只读 · 内置插件' }}</Badge>
+            <Badge variant="outline">rev {{ source?.revision }}</Badge>
+          </div>
+        </div>
+
+        <Card class="mt-3">
+          <CardContent>
+            <Field label="Plugin Source（JSON）" hint="模板变量 {{base_url}} 必须在 params 中声明；内置变量：file_name / mime_type / bucket / object_key / file_size / timestamp / unix。响应路径支持点号与数组下标。">
+              <textarea
+                v-model="sourceText" :readonly="!source?.editable" spellcheck="false"
+                class="min-h-[340px] w-full resize-y rounded-md border border-input bg-background px-3 py-2.5 font-mono text-[11.5px] leading-[1.65] shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25 read-only:bg-muted/40"
               />
-              <button v-if="f.sensitive" class="btn btn--sm" type="button" @click="showSecret[f.key] = !showSecret[f.key]">{{ showSecret[f.key] ? '隐藏' : '显示' }}</button>
+            </Field>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <Button variant="outline" :disabled="sourceBusy" @click="validateSource"><Check />静态校验</Button>
+              <Button :disabled="sourceBusy || !source?.editable" @click="saveSource"><Save />保存源码（全量）</Button>
+              <Button variant="outline" :disabled="sourceBusy" @click="exportSource('json')"><Download />导出 JSON</Button>
+              <Button variant="outline" :disabled="sourceBusy" @click="exportSource('go')"><Download />导出 Go 源码</Button>
+              <Button v-if="source?.custom" variant="destructive" size="sm" class="ml-auto" @click="deletePlugin"><Trash2 />删除插件</Button>
             </div>
-            <div v-if="volatileField && f.key === volatileField.expiresField" class="field-help" style="color:var(--warn)">⏱ {{ expiryHint }}</div>
-            <div v-else class="field-help">{{ f.help }}</div>
+          </CardContent>
+        </Card>
+
+        <Card v-if="source?.editable" class="mt-4">
+          <CardHeader class="pb-4">
+            <CardTitle>差量修改源码</CardTitle>
+            <CardDescription>支持点号路径（如 request.headers.Authorization），值为 null 表示删除该字段；params 数组按 key 合并，未涉及的字段保持不变。</CardDescription>
+          </CardHeader>
+          <CardContent class="border-t pt-4">
+            <Field label="Patch JSON">
+              <textarea
+                v-model="sourcePatch" spellcheck="false"
+                class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[11.5px] leading-relaxed shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
+              />
+            </Field>
+            <Button size="sm" class="mt-3" :disabled="sourceBusy" @click="patchSource"><Code2 />应用差量修改</Button>
+          </CardContent>
+        </Card>
+
+        <Card v-if="validateResult" class="mt-4">
+          <div class="flex items-center justify-between gap-3 border-b px-4 py-3">
+            <span class="text-[13px] font-medium">校验结果</span>
+            <Badge :variant="validateResult.valid ? 'success' : 'destructive'">{{ validateResult.valid ? 'PASS' : 'FAIL' }}</Badge>
+          </div>
+          <div class="space-y-2 p-4">
+            <p v-if="validateResult.paramsError" class="text-[11.5px] text-destructive">{{ validateResult.paramsError }}</p>
+            <p v-if="validateResult.missingRequired?.length" class="text-[11.5px] text-muted-foreground">
+              缺少必填参数：{{ validateResult.missingRequired.join(', ') }}
+            </p>
+            <p class="text-[10.5px] font-medium tracking-wide text-muted-foreground">请求预览（敏感值已脱敏）</p>
+            <CodeBlock :code="JSON.stringify(validateResult.requestPreview, null, 2)" max-height="360px" />
+          </div>
+        </Card>
+
+        <div v-if="exportResult" class="mt-4">
+          <p class="mb-2 font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">导出 · {{ exportResult.filename }}</p>
+          <CodeBlock :code="exportResult.content" label="export" max-height="360px" />
+        </div>
+      </TabContent>
+
+      <!-- 差量 / 全量 / 更新 -->
+      <TabContent value="advanced">
+        <p class="mb-4 max-w-3xl text-[11.5px] leading-relaxed text-muted-foreground">
+          与 MCP 的 plugin_patch / plugin_replace / plugin_update 工具等价。所有写入都会记录到变更审计。
+        </p>
+        <div class="grid gap-4 lg:grid-cols-3">
+          <Card>
+            <CardHeader class="pb-4"><CardTitle>差量修改</CardTitle><CardDescription>plugin_patch · 只覆盖传入字段，params 按键合并</CardDescription></CardHeader>
+            <CardContent class="border-t pt-4">
+              <Field label="Patch JSON">
+                <textarea v-model="patchJSON" class="min-h-36 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[11.5px] shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25" />
+              </Field>
+              <Button class="mt-3 w-full" @click="applyPatch">应用差量修改</Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader class="pb-4"><CardTitle>全量修改</CardTitle><CardDescription>plugin_replace · 未提供的参数重置为默认值</CardDescription></CardHeader>
+            <CardContent class="border-t pt-4">
+              <Field label="Full JSON">
+                <textarea v-model="fullJSON" class="min-h-36 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[11.5px] shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25" />
+              </Field>
+              <Button variant="destructive" class="mt-3 w-full" @click="applyReplace">全量替换配置</Button>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardHeader class="pb-4"><CardTitle>插件更新</CardTitle><CardDescription>plugin_update · 升级版本并同步清单新增参数</CardDescription></CardHeader>
+            <CardContent class="space-y-3 border-t pt-4">
+              <Field label="目标版本"><Input v-model="updateSpec.version" placeholder="留空使用内置版本" /></Field>
+              <label class="flex items-center gap-2 text-[12px]"><Switch v-model="updateSpec.syncParams" />补齐清单中新增参数</label>
+              <label class="flex items-center gap-2 text-[12px]"><Switch v-model="updateSpec.resetToDefault" />重置全部参数为默认值</label>
+              <Field label="更新说明"><Input v-model="updateSpec.note" placeholder="可选" /></Field>
+              <Button class="w-full" @click="applyUpdate">执行更新</Button>
+            </CardContent>
+          </Card>
+        </div>
+      </TabContent>
+
+      <!-- 变更记录 -->
+      <TabContent value="changes">
+        <Card class="overflow-hidden">
+          <div class="overflow-x-auto">
+            <table class="data-table">
+              <thead><tr><th>时间</th><th>动作</th><th class="hidden sm:table-cell">操作者</th><th>说明</th><th class="hidden lg:table-cell">字段变更</th></tr></thead>
+              <tbody>
+                <tr v-for="c in changes" :key="c.id">
+                  <td class="whitespace-nowrap text-[11px] text-muted-foreground">{{ fmtTime(c.createdAt) }}</td>
+                  <td><Badge variant="outline">{{ c.action }}</Badge></td>
+                  <td class="hidden font-mono text-[11px] sm:table-cell">{{ c.actor }}</td>
+                  <td class="text-[11.5px]">{{ c.message }}</td>
+                  <td class="hidden max-w-[22rem] break-words font-mono text-[10.5px] text-muted-foreground lg:table-cell">{{ truncate(JSON.stringify(c.diff || {}), 140) }}</td>
+                </tr>
+                <tr v-if="!changes.length">
+                  <td colspan="5"><Empty title="暂无变更记录" description="参数修改、更新与调试都会在此留痕。" /></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      </TabContent>
+
+      <!-- 文档 -->
+      <TabContent value="docs">
+        <Card>
+          <CardContent class="pt-4">
+            <div class="doc-prose" v-html="renderMarkdown(view?.manifest?.docs || '该插件未提供接入说明。')" />
+          </CardContent>
+        </Card>
+        <div class="mt-5">
+          <div class="mb-2 flex items-center justify-between gap-3">
+            <div>
+              <h2 class="text-sm font-semibold">示例代码</h2>
+              <p class="mt-0.5 text-[11.5px] text-muted-foreground">实现 Uploader 接口的最小骨架</p>
+            </div>
+            <Button size="sm" variant="outline" @click="showManifest = !showManifest">{{ showManifest ? '收起 Manifest' : '完整 Manifest' }}</Button>
+          </div>
+          <CodeBlock :code="view?.manifest?.sampleCode || ''" label="sample" />
+          <div v-if="showManifest" class="mt-3">
+            <CodeBlock :code="JSON.stringify(view?.manifest, null, 2)" label="manifest.json" max-height="420px" />
           </div>
         </div>
-      </div>
-
-      <div v-if="volatileField" class="panel" style="margin-top:26px;background:var(--warn-soft);border-color:var(--warn)">
-        <div style="display:flex;justify-content:space-between;gap:16px;align-items:center;flex-wrap:wrap">
-          <div>
-            <div class="strong" style="font-size:13px">临时凭据助手</div>
-            <div class="tiny muted" style="margin-top:4px">粘贴 Bearer Token 后一键解析 exp / sub，自动回填过期时间与 X-User-Id。{{ expiryHint }}</div>
-          </div>
-          <button class="btn btn--sm" @click="parseToken">从 Token 解析过期时间</button>
-        </div>
-      </div>
-
-      <div style="margin-top:28px;display:flex;gap:9px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn--primary" :disabled="saving" @click="saveParams">{{ saving ? '保存中…' : '保存参数配置' }}</button>
-        <button class="btn" @click="load">重新载入</button>
-        <span class="tiny muted">敏感字段留空表示保持原值；服务端以 AES-256-GCM 加密存储</span>
-      </div>
-    </div>
-
-    <!-- 调试与检测 -->
-    <div v-else-if="tab === 'debug'">
-      <div class="btn-group" style="margin-bottom:22px">
-        <button class="btn btn--primary" @click="runDebug">▷ 运行插件调试</button>
-        <button class="btn" @click="runCheck">◎ 立即健康检测</button>
-      </div>
-      <p class="section-note" style="margin-bottom:20px">调试不会上传真实文件：依次检查参数合法性、临时凭据有效期与上游连通性。</p>
-      <div v-if="debugReport" class="panel panel--flush">
-        <div style="padding:16px 20px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px">
-          <div><span class="strong">诊断结果</span> <span class="mono muted tiny" style="margin-left:8px">v{{ debugReport.version }} · {{ fmtTime(debugReport.checkedAt) }}</span></div>
-          <span class="tag" :class="debugReport.healthy ? 'tag--good' : 'tag--accent'">{{ debugReport.healthy ? 'PASS' : 'FAIL' }}</span>
-        </div>
-        <table>
-          <thead><tr><th>步骤</th><th>结论</th><th>详情</th><th class="right">耗时</th></tr></thead>
-          <tbody>
-            <tr v-for="(s, i) in debugReport.steps" :key="i">
-              <td class="cell-main">{{ s.name }}</td>
-              <td><span class="tag" :class="s.status === 'pass' ? 'tag--good' : (s.status === 'warn' ? 'tag--warn' : 'tag--accent')">{{ s.status.toUpperCase() }}</span></td>
-              <td class="tiny" style="max-width:560px;word-break:break-word">{{ s.detail }}</td>
-              <td class="num mono">{{ s.durationMs }}ms</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="empty"><div class="empty-title">尚未运行调试</div><p>点击上方按钮，三步诊断插件配置与上游链路。</p></div>
-    </div>
-
-    <!-- 插件源码（声明式定义） -->
-    <div v-else-if="tab === 'source'">
-      <div class="section-head" style="margin-bottom:16px">
-        <div>
-          <h2 class="section-title">声明式插件源码</h2>
-          <p class="section-note">一份 JSON 定义参数 Schema、请求模板与响应映射；保存后立即编译生效、无需重启，与 MCP 的 <code class="code">plugin_code_*</code> 工具完全同源</p>
-        </div>
-        <div class="btn-group">
-          <span class="tag" :class="source?.editable ? 'tag--good' : 'tag--warn'">{{ source?.editable ? '可编辑' : '只读 · 内置插件' }}</span>
-          <span class="tag">revision {{ source?.revision }}</span>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="field">
-          <label>Plugin Source（JSON）</label>
-          <textarea v-model="sourceText" :readonly="!source?.editable" spellcheck="false" style="min-height:340px;font-family:var(--mono);font-size:12px;line-height:1.6"></textarea>
-          <div class="field-help">
-            模板变量 <code class="code">&#123;&#123;base_url&#125;&#125;</code> 必须在 params 中声明；内置变量：file_name / mime_type / bucket / object_key / file_size / timestamp / unix。
-            响应路径支持点号与数组下标，如 <code class="code">data.fileInfo.fileName</code>。
-          </div>
-        </div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
-          <button class="btn" :disabled="sourceBusy" @click="validateSource">✓ 静态校验</button>
-          <button class="btn btn--primary" :disabled="sourceBusy || !source?.editable" @click="saveSource">保存源码（全量）</button>
-          <button class="btn" :disabled="sourceBusy" @click="exportSource('json')">导出 JSON</button>
-          <button class="btn" :disabled="sourceBusy" @click="exportSource('go')">导出 Go 源码</button>
-          <button v-if="source?.custom" class="btn btn--danger btn--sm" @click="deletePlugin">删除插件</button>
-        </div>
-      </div>
-
-      <div v-if="source?.editable" class="panel" style="margin-top:18px">
-        <div class="eyebrow">plugin_code_patch</div>
-        <h3 class="section-title">差量修改源码</h3>
-        <p class="section-note">支持点号路径（如 <code class="code">request.headers.Authorization</code>），值为 null 表示删除该字段；params 数组按 key 合并。未涉及的字段保持不变。</p>
-        <div class="field" style="margin-top:16px">
-          <label>Patch JSON</label>
-          <textarea v-model="sourcePatch" style="min-height:110px;font-family:var(--mono);font-size:12px"></textarea>
-        </div>
-        <button class="btn btn--primary btn--sm" style="margin-top:12px" :disabled="sourceBusy" @click="patchSource">应用差量修改</button>
-      </div>
-
-      <div v-if="validateResult" class="panel" style="margin-top:18px">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
-          <div class="section-title">校验结果</div>
-          <span class="tag" :class="validateResult.valid ? 'tag--good' : 'tag--accent'">{{ validateResult.valid ? 'PASS' : 'FAIL' }}</span>
-        </div>
-        <p v-if="validateResult.paramsError" class="tiny" style="color:var(--accent)">{{ validateResult.paramsError }}</p>
-        <p v-if="validateResult.missingRequired?.length" class="tiny muted">缺少必填参数：{{ validateResult.missingRequired.join(', ') }}</p>
-        <div class="eyebrow" style="margin:14px 0 8px">请求预览（敏感值已脱敏）</div>
-        <pre class="codeblock"><code>{{ JSON.stringify(validateResult.requestPreview, null, 2) }}</code></pre>
-      </div>
-
-      <div v-if="exportResult" class="panel" style="margin-top:18px">
-        <div class="eyebrow">导出 · {{ exportResult.filename }}</div>
-        <pre class="codeblock" style="margin-top:12px;max-height:360px"><code>{{ exportResult.content }}</code></pre>
-      </div>
-    </div>
-
-    <!-- 差量 / 全量 / 更新 -->
-    <div v-else-if="tab === 'advanced'">
-      <p class="page-desc" style="margin-bottom:26px">与 MCP 的 <code class="code">plugin_patch</code> / <code class="code">plugin_replace</code> / <code class="code">plugin_update</code> 工具等价。所有写入都会记录到变更审计。</p>
-      <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));align-items:start">
-        <div class="panel">
-          <div class="eyebrow">plugin_patch</div>
-          <h3 class="section-title">差量修改</h3>
-          <p class="section-note">只覆盖传入字段，params 按键合并</p>
-          <div class="field" style="margin-top:18px">
-            <label>Patch JSON</label>
-            <textarea v-model="patchJSON" style="min-height:150px"></textarea>
-          </div>
-          <button class="btn btn--primary btn--block" style="margin-top:14px" @click="applyPatch">应用差量修改</button>
-        </div>
-        <div class="panel">
-          <div class="eyebrow">plugin_replace</div>
-          <h3 class="section-title">全量修改</h3>
-          <p class="section-note">未提供的参数重置为默认值</p>
-          <div class="field" style="margin-top:18px">
-            <label>Full JSON</label>
-            <textarea v-model="fullJSON" style="min-height:150px"></textarea>
-          </div>
-          <button class="btn btn--danger btn--block" style="margin-top:14px" @click="applyReplace">全量替换配置</button>
-        </div>
-        <div class="panel">
-          <div class="eyebrow">plugin_update</div>
-          <h3 class="section-title">插件更新</h3>
-          <p class="section-note">升级版本并同步清单新增参数</p>
-          <div class="field" style="margin-top:18px"><label>目标版本</label><input v-model="updateSpec.version" placeholder="留空使用内置版本" /></div>
-          <div class="checkbox-row" style="margin-top:14px"><input type="checkbox" v-model="updateSpec.syncParams" /><span>补齐清单中新增参数</span></div>
-          <div class="checkbox-row" style="margin-top:8px"><input type="checkbox" v-model="updateSpec.resetToDefault" /><span>重置全部参数为默认值</span></div>
-          <div class="field" style="margin-top:14px"><label>更新说明</label><input v-model="updateSpec.note" placeholder="可选" /></div>
-          <button class="btn btn--primary btn--block" style="margin-top:14px" @click="applyUpdate">执行更新</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- 变更记录 -->
-    <div v-else-if="tab === 'changes'">
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>时间</th><th>动作</th><th>操作者</th><th>说明</th><th>字段变更</th></tr></thead>
-          <tbody>
-            <tr v-for="c in changes" :key="c.id">
-              <td class="tiny muted nowrap">{{ fmtTime(c.createdAt) }}</td>
-              <td><span class="tag">{{ c.action }}</span></td>
-              <td class="mono tiny">{{ c.actor }}</td>
-              <td class="tiny">{{ c.message }}</td>
-              <td class="mono tiny" style="max-width:340px;word-break:break-word">{{ truncate(JSON.stringify(c.diff || {}), 160) }}</td>
-            </tr>
-            <tr v-if="!changes.length"><td colspan="5"><div class="empty"><div class="empty-title">暂无变更记录</div><p>参数修改、更新与调试都会在此留痕。</p></div></td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <!-- 文档 -->
-    <div v-else>
-      <div class="prose" v-html="renderMarkdown(view?.manifest?.docs || '该插件未提供接入说明。')"></div>
-      <div class="section">
-        <div class="section-head">
-          <div><h2 class="section-title">示例代码</h2><p class="section-note">实现 Uploader 接口的最小骨架</p></div>
-          <button class="btn btn--sm" @click="showManifest = !showManifest">{{ showManifest ? '收起' : '查看完整 Manifest' }}</button>
-        </div>
-        <pre class="codeblock" style="margin-top:16px"><code>{{ view?.manifest?.sampleCode }}</code></pre>
-        <pre v-if="showManifest" class="codeblock" style="margin-top:12px"><code>{{ JSON.stringify(view?.manifest, null, 2) }}</code></pre>
-      </div>
-    </div>
+      </TabContent>
+    </Tabs>
   </div>
 </template>

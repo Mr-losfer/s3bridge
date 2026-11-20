@@ -1,10 +1,25 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
+import {
+  KeyRound, Plus, RefreshCw, Copy, Eye, EyeOff, BookOpen, ShieldCheck, Trash2,
+  CircleCheck, Server, X, ExternalLink,
+} from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { go } from '../router'
 import { fmtTime, relTime } from '../utils'
 import { session } from '../session'
+import PageHeader from '../components/PageHeader.vue'
+import Badge from '../components/ui/Badge.vue'
+import Button from '../components/ui/Button.vue'
+import Card from '../components/ui/Card.vue'
+import Input from '../components/ui/Input.vue'
+import Field from '../components/ui/Field.vue'
+import Sheet from '../components/ui/Sheet.vue'
+import Dialog from '../components/ui/Dialog.vue'
+import Empty from '../components/ui/Empty.vue'
+import Skeleton from '../components/ui/Skeleton.vue'
+import CodeBlock from '../components/CodeBlock.vue'
 
 const keys = ref([])
 const allPerms = ref([])
@@ -114,191 +129,254 @@ aws --endpoint-url ${fullEndpoint.value} s3 ls`
 
 <template>
   <div>
-    <div class="page-head">
-      <div>
-        <div class="eyebrow">Credentials / API 密钥</div>
-        <h1 class="page-title">API 密钥与 S3 凭据</h1>
-        <p class="page-desc">同一把密钥既可作为 REST <code class="code">Bearer</code> 令牌，也可作为 S3 SigV4 的 AccessKeyId / SecretAccessKey。每个用户只看到自己的密钥，且随时可重新查看明文。</p>
-      </div>
-      <div class="btn-group">
-        <button class="btn" @click="load">↻ 刷新</button>
-        <button class="btn" @click="go('docs', 's3-api')">S3 接口文档 →</button>
-        <button class="btn btn--primary" @click="openCreate">＋ 创建密钥</button>
-      </div>
-    </div>
+    <PageHeader
+      title="API 密钥与 S3 凭据"
+      description="同一把密钥既可作为 REST Bearer 令牌，也可作为 S3 SigV4 的 AccessKeyId / SecretAccessKey。每个用户只看到自己的密钥，且随时可重新查看明文。"
+    >
+      <template #actions>
+        <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
+        <Button variant="ghost" @click="go('docs', 's3-api')"><BookOpen />S3 文档</Button>
+        <Button @click="openCreate"><Plus />创建密钥</Button>
+      </template>
+    </PageHeader>
 
     <!-- 创建结果 -->
-    <div v-if="created" class="alert-strip" style="display:block;border-left-width:3px;margin-bottom:22px">
-      <div style="display:flex;justify-content:space-between;gap:12px;align-items:flex-start">
+    <div v-if="created" class="mb-5 overflow-hidden rounded-xl border border-success/25 bg-success/[0.05]">
+      <div class="flex items-start gap-2.5 p-4">
+        <CircleCheck class="mt-0.5 size-4 shrink-0 text-success" />
+        <div class="min-w-0 flex-1">
+          <p class="text-[13px] font-medium">密钥已创建</p>
+          <p class="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+            明文已加密保存，无需一次性抄录。关闭后随时可在列表点「查看」再次获取，也可在「MCP 能力」页面直接复制现成的对接代码。
+          </p>
+        </div>
+        <Button size="icon-sm" variant="ghost" aria-label="关闭" @click="created = null"><X /></Button>
+      </div>
+      <div class="space-y-2 border-t border-success/15 px-4 py-3 text-[11.5px]">
+        <div class="grid grid-cols-[6.5rem_1fr] items-center gap-2">
+          <span class="text-muted-foreground">AccessKeyId</span>
+          <div class="flex min-w-0 items-center gap-1.5">
+            <code class="min-w-0 flex-1 break-all font-mono text-[10.5px]">{{ created.accessKeyId }}</code>
+            <Button size="sm" variant="outline" @click="copy(created.accessKeyId, 'AccessKeyId')"><Copy />复制</Button>
+          </div>
+        </div>
+        <div class="grid grid-cols-[6.5rem_1fr] items-center gap-2">
+          <span class="text-muted-foreground">SecretAccessKey</span>
+          <div class="flex min-w-0 items-center gap-1.5">
+            <code class="min-w-0 flex-1 break-all font-mono text-[10.5px]">{{ created.secretAccessKey }}</code>
+            <Button size="sm" variant="outline" @click="copy(created.secretAccessKey, 'SecretAccessKey')"><Copy />复制</Button>
+          </div>
+        </div>
+      </div>
+      <div class="px-4 pb-4">
+        <CodeBlock :code="awsEnv" label="aws-cli" />
+      </div>
+    </div>
+
+    <!-- S3 接入点 -->
+    <Card class="p-4 sm:p-5">
+      <div class="flex items-center gap-2">
+        <Server class="size-4 text-muted-foreground" />
+        <h2 class="text-sm font-semibold">S3 接入点</h2>
+        <Badge variant="outline" class="ml-auto">SigV4 · path-style</Badge>
+      </div>
+      <div class="mt-3 space-y-2.5 text-[11.5px]">
+        <div class="flex items-center gap-2">
+          <span class="w-24 shrink-0 text-muted-foreground">Endpoint</span>
+          <code class="min-w-0 flex-1 break-all rounded border bg-muted/50 px-1.5 py-0.5 font-mono text-[10.5px]">{{ fullEndpoint }}</code>
+          <Button size="icon-sm" variant="ghost" aria-label="复制 Endpoint" @click="copy(fullEndpoint, 'Endpoint')"><Copy /></Button>
+        </div>
+        <div class="flex gap-2">
+          <span class="w-24 shrink-0 text-muted-foreground">Region</span>
+          <span class="font-mono text-[10.5px]">{{ region }}</span>
+        </div>
+        <div class="flex flex-col gap-1 sm:flex-row sm:gap-2">
+          <span class="w-24 shrink-0 text-muted-foreground">示例命令</span>
+          <code class="break-all font-mono text-[10.5px]">{{ creds?.example || 'aws --endpoint-url ' + fullEndpoint + ' s3 ls' }}</code>
+        </div>
+      </div>
+    </Card>
+
+    <!-- 密钥列表 -->
+    <div class="mt-6">
+      <div class="mb-3 flex flex-wrap items-end justify-between gap-2">
         <div>
-          <div class="alert-strip-title">✓ 密钥已创建</div>
-          <div class="alert-strip-body">明文已加密保存，无需一次性抄录。关闭后随时可在下方列表点「查看」再次获取，也可在「MCP 能力」页面直接复制现成的对接代码。</div>
+          <h2 class="text-sm font-semibold">密钥列表</h2>
+          <p class="mt-0.5 text-[11.5px] text-muted-foreground">共 {{ keys.length }} 把 · 作用域留空表示继承用户全部权限 · 点「查看」随时取回明文</p>
         </div>
-        <button class="icon-btn" @click="created = null">✕</button>
+        <Badge variant="success"><ShieldCheck class="size-3" />AES-256-GCM</Badge>
       </div>
-      <dl class="kv" style="grid-template-columns:150px 1fr;margin-top:16px">
-        <dt>AccessKeyId</dt>
-        <dd class="mono" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">{{ created.accessKeyId }}<button class="btn btn--sm" @click="copy(created.accessKeyId, 'AccessKeyId')">复制</button></dd>
-        <dt>SecretAccessKey</dt>
-        <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">{{ created.secretAccessKey }}<button class="btn btn--sm" @click="copy(created.secretAccessKey, 'SecretAccessKey')">复制</button></dd>
-      </dl>
-      <pre class="codeblock" style="margin-top:16px"><code>{{ awsEnv }}</code></pre>
-      <div style="display:flex;gap:8px;margin-top:14px">
-        <button class="btn btn--sm" @click="copy(awsEnv, '环境变量')">复制环境变量</button>
-        <button class="btn btn--quiet btn--sm" @click="created = null">关闭</button>
-      </div>
-    </div>
 
-    <div class="section">
-      <div class="section-head"><div><h2 class="section-title">S3 接入点</h2><p class="section-note">用 AWS SDK / aws-cli / s3cmd 直接访问，无需改造业务代码</p></div></div>
-      <div class="panel" style="margin-top:18px">
-        <dl class="kv">
-          <dt>Endpoint</dt><dd><code class="code">{{ fullEndpoint }}</code> <button class="btn btn--quiet btn--sm" style="padding:2px 6px" @click="copy(fullEndpoint, 'Endpoint')">复制</button></dd>
-          <dt>Region</dt><dd class="mono">{{ region }}</dd>
-          <dt>签名版本</dt><dd class="mono">AWS Signature V4 · path-style addressing</dd>
-          <dt>示例命令</dt><dd><code class="code">{{ creds?.example || 'aws --endpoint-url ' + fullEndpoint + ' s3 ls' }}</code></dd>
-          <dt>说明</dt><dd class="tiny muted">{{ creds?.note }}</dd>
-        </dl>
-      </div>
-    </div>
+      <Card class="overflow-hidden">
+        <div v-if="loading" class="space-y-2 p-4"><Skeleton v-for="i in 3" :key="i" class="h-11" /></div>
 
-    <div class="section">
-      <div class="section-head">
-        <div><h2 class="section-title">密钥列表</h2><p class="section-note">共 {{ keys.length }} 把 · 作用域留空表示继承用户全部权限 · 点「查看」随时取回明文</p></div>
-      </div>
-      <div class="table-wrap" style="margin-top:18px">
-        <table>
-          <thead><tr><th>名称</th><th>AccessKeyId</th><th>Secret</th><th>作用域</th><th>状态</th><th>创建 / 最后使用</th><th></th></tr></thead>
-          <tbody>
-            <tr v-for="k in keys" :key="k.id" :class="{ 'is-unhealthy': k.revoked }">
-              <td>
-                <div class="cell-main">{{ k.name }}</div>
-                <div class="cell-sub mono tiny">{{ k.id }} · {{ k.userId === session.user?.id ? '本人' : k.userId }}</div>
-              </td>
-              <td class="mono tiny">{{ k.accessKey }}</td>
-              <td class="mono tiny muted">{{ k.secretHint || '••••••••' }}</td>
-              <td style="max-width:220px">
-                <div class="inline-list">
-                  <span v-for="s in (k.scopes || []).slice(0, 3)" :key="s" class="tag">{{ s }}</span>
-                  <span v-if="(k.scopes || []).length > 3" class="tag">+{{ k.scopes.length - 3 }}</span>
-                  <span v-if="!(k.scopes || []).length" class="tag tag--good">全部权限</span>
-                </div>
-              </td>
-              <td><span class="status" :class="k.revoked ? 'status--disabled' : 'status--healthy'">{{ k.revoked ? '已撤销' : '有效' }}</span><div v-if="k.expiresAt" class="cell-sub tiny">到期 {{ fmtTime(k.expiresAt) }}</div></td>
-              <td class="muted tiny nowrap">{{ fmtTime(k.createdAt) }}<div class="cell-sub">{{ k.lastUsedAt ? relTime(k.lastUsedAt) : '从未使用' }}</div></td>
-              <td>
-                <div class="row-actions">
-                  <button class="btn btn--sm" :disabled="revealBusy === k.id" @click="reveal(k)">{{ revealBusy === k.id ? '…' : '查看' }}</button>
-                  <button class="btn btn--quiet btn--sm" @click="copy(k.accessKey, 'AccessKeyId')">{{ copied === 'AccessKeyId' ? '已复制' : '复制' }}</button>
-                  <button v-if="!k.revoked" class="btn btn--quiet btn--sm" :disabled="busy === k.id" @click="revoke(k)">撤销</button>
-                </div>
-              </td>
-            </tr>
-            <tr v-if="!keys.length && !loading"><td colspan="7"><div class="empty"><div class="empty-title">还没有密钥</div><p>创建一把密钥即可用标准 S3 客户端接入，之后随时可回来查看明文。</p><button class="btn btn--primary btn--sm" @click="openCreate">创建密钥</button></div></td></tr>
-            <tr v-if="loading"><td colspan="7"><div class="empty"><span class="spinner"></span> 正在加载…</div></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="tiny muted" style="margin-top:12px">SecretAccessKey 在服务端以 AES-256-GCM 加密存储，鉴权使用 SHA-256 摘要比对；明文不写入日志与状态文件，仅登录后的本人或管理员可按需解密查看。</p>
-    </div>
-
-    <!-- 查看凭据弹窗 -->
-    <template v-if="revealed">
-      <div class="modal-backdrop" @click.self="revealed = null">
-        <div class="modal" role="dialog" aria-modal="true" aria-label="查看密钥凭据">
-          <div class="modal-head">
-            <div>
-              <div class="eyebrow" style="margin-bottom:7px">Credential / 凭据详情</div>
-              <h2 class="modal-title">{{ revealed.name || '未命名密钥' }}</h2>
-              <p class="modal-sub">{{ revealed.id }} · {{ revealed.revoked ? '已撤销' : '有效' }} · 创建于 {{ fmtTime(revealed.createdAt) }}</p>
-            </div>
-            <button class="modal-close" title="关闭" @click="revealed = null">×</button>
-          </div>
-          <div class="modal-body">
-            <div class="alert-strip" style="margin-bottom:18px">
-              <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">!</div>
-              <div class="alert-strip-body">这把密钥同时用于 REST / MCP 的 Bearer 鉴权与 S3 SigV4 签名。明文可随时再来查看，请勿提交到公开仓库或聊天记录。</div>
-            </div>
-            <dl class="kv" style="grid-template-columns:170px 1fr">
-              <dt>API Key / Bearer</dt>
-              <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                {{ showSecret ? revealed.secretAccessKey : '••••••••••••••••••••••••' }}
-                <button class="btn btn--quiet btn--sm" @click="showSecret = !showSecret">{{ showSecret ? '隐藏' : '显示' }}</button>
-                <button class="btn btn--sm" @click="copy(revealed.secretAccessKey, 'reveal-bearer')">{{ copied === 'reveal-bearer' ? '已复制' : '复制' }}</button>
-              </dd>
-              <dt>AccessKeyId</dt>
-              <dd class="mono" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                {{ revealed.accessKeyId }}
-                <button class="btn btn--sm" @click="copy(revealed.accessKeyId, 'reveal-access')">{{ copied === 'reveal-access' ? '已复制' : '复制' }}</button>
-              </dd>
-              <dt>SecretAccessKey</dt>
-              <dd class="mono" style="word-break:break-all;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                {{ showSecret ? revealed.secretAccessKey : '••••••••••••••••••••••••' }}
-                <button class="btn btn--sm" @click="copy(revealed.secretAccessKey, 'reveal-secret')">{{ copied === 'reveal-secret' ? '已复制' : '复制' }}</button>
-              </dd>
-              <dt>Endpoint / Region</dt>
-              <dd class="mono tiny">{{ fullEndpoint }} · {{ revealed.region || region }}</dd>
-              <dt>状态 / 作用域</dt>
-              <dd class="tiny">{{ revealed.revoked ? '已撤销' : '有效' }} · {{ (revealed.scopes || []).length ? revealed.scopes.join(', ') : '继承用户全部权限' }}<span v-if="revealed.expiresAt"> · 到期 {{ fmtTime(revealed.expiresAt) }}</span></dd>
-            </dl>
-            <div class="eyebrow" style="margin:22px 0 10px">可直接复制的对接代码</div>
-            <pre class="codeblock"><code>{{ revealCode }}</code></pre>
-          </div>
-          <div class="modal-foot">
-            <button class="btn btn--quiet btn--sm" @click="copy(revealCode, 'reveal-code')">{{ copied === 'reveal-code' ? '已复制' : '复制对接代码' }}</button>
-            <button class="btn" @click="go('mcp')">MCP 接入示例 →</button>
-            <button class="btn btn--primary" @click="revealed = null">关闭</button>
-          </div>
+        <div v-else class="hidden overflow-x-auto md:block">
+          <table class="data-table">
+            <thead>
+              <tr><th>名称</th><th>AccessKeyId</th><th class="hidden lg:table-cell">Secret</th><th>作用域</th><th>状态</th><th class="hidden xl:table-cell">创建 / 最后使用</th><th class="w-36"></th></tr>
+            </thead>
+            <tbody>
+              <tr v-for="k in keys" :key="k.id" :class="k.revoked && 'opacity-55'">
+                <td>
+                  <div class="font-medium">{{ k.name }}</div>
+                  <div class="mt-0.5 font-mono text-[10px] text-muted-foreground">{{ k.id }} · {{ k.userId === session.user?.id ? '本人' : k.userId }}</div>
+                </td>
+                <td class="font-mono text-[10.5px]">{{ k.accessKey }}</td>
+                <td class="hidden font-mono text-[10.5px] text-muted-foreground lg:table-cell">{{ k.secretHint || '••••••••' }}</td>
+                <td class="max-w-[13rem]">
+                  <div class="flex flex-wrap gap-1">
+                    <Badge v-for="s in (k.scopes || []).slice(0, 3)" :key="s" variant="outline">{{ s }}</Badge>
+                    <Badge v-if="(k.scopes || []).length > 3" variant="outline">+{{ k.scopes.length - 3 }}</Badge>
+                    <Badge v-if="!(k.scopes || []).length" variant="success">全部权限</Badge>
+                  </div>
+                </td>
+                <td>
+                  <Badge :variant="k.revoked ? 'outline' : 'success'">{{ k.revoked ? '已撤销' : '有效' }}</Badge>
+                  <div v-if="k.expiresAt" class="mt-1 text-[10px] text-muted-foreground">到期 {{ fmtTime(k.expiresAt) }}</div>
+                </td>
+                <td class="hidden whitespace-nowrap text-[11px] text-muted-foreground xl:table-cell">
+                  {{ fmtTime(k.createdAt) }}<div class="mt-0.5 text-[10px]">{{ k.lastUsedAt ? relTime(k.lastUsedAt) : '从未使用' }}</div>
+                </td>
+                <td>
+                  <div class="flex items-center justify-end gap-1">
+                    <Button size="sm" variant="outline" :disabled="revealBusy === k.id" @click="reveal(k)"><Eye />{{ revealBusy === k.id ? '…' : '查看' }}</Button>
+                    <Button size="icon-sm" variant="ghost" aria-label="复制 AccessKeyId" @click="copy(k.accessKey, 'AccessKeyId')"><Copy /></Button>
+                    <Button v-if="!k.revoked" size="icon-sm" variant="ghost" aria-label="撤销" class="text-muted-foreground hover:text-destructive" :disabled="busy === k.id" @click="revoke(k)"><Trash2 /></Button>
+                  </div>
+                </td>
+              </tr>
+              <tr v-if="!keys.length">
+                <td colspan="7">
+                  <Empty title="还没有密钥" description="创建一把密钥即可用标准 S3 客户端接入，之后随时可回来查看明文。">
+                    <Button size="sm" @click="openCreate"><Plus />创建密钥</Button>
+                  </Empty>
+                </td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-      </div>
-    </template>
 
-    <!-- 创建抽屉 -->
-    <template v-if="drawer">
-      <div class="drawer-backdrop" @click="drawer = false"></div>
-      <aside class="drawer">
-        <div class="drawer-head">
+        <div v-if="!loading" class="divide-y md:hidden">
+          <div v-for="k in keys" :key="k.id" class="p-3.5" :class="k.revoked && 'opacity-55'">
+            <div class="flex items-start gap-2">
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-[13px] font-medium">{{ k.name }}</p>
+                <p class="mt-0.5 break-all font-mono text-[10px] text-muted-foreground">{{ k.accessKey }}</p>
+              </div>
+              <Badge :variant="k.revoked ? 'outline' : 'success'">{{ k.revoked ? '已撤销' : '有效' }}</Badge>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1">
+              <Badge v-for="s in (k.scopes || []).slice(0, 3)" :key="s" variant="outline">{{ s }}</Badge>
+              <Badge v-if="!(k.scopes || []).length" variant="success">全部权限</Badge>
+            </div>
+            <div class="mt-2.5 flex items-center gap-1.5 border-t pt-2.5">
+              <Button size="sm" variant="outline" class="flex-1" :disabled="revealBusy === k.id" @click="reveal(k)"><Eye />查看</Button>
+              <Button size="sm" variant="ghost" @click="copy(k.accessKey, 'AccessKeyId')"><Copy />复制</Button>
+              <Button v-if="!k.revoked" size="sm" variant="ghost" class="text-muted-foreground" :disabled="busy === k.id" @click="revoke(k)"><Trash2 />撤销</Button>
+            </div>
+          </div>
+          <Empty v-if="!keys.length" title="还没有密钥" description="创建一把密钥即可用标准 S3 客户端接入。">
+            <Button size="sm" @click="openCreate"><Plus />创建密钥</Button>
+          </Empty>
+        </div>
+      </Card>
+      <p class="mt-2.5 text-[11px] leading-relaxed text-muted-foreground">
+        SecretAccessKey 在服务端以 AES-256-GCM 加密存储，鉴权使用 SHA-256 摘要比对；明文不写入日志与状态文件，仅登录后的本人或管理员可按需解密查看。
+      </p>
+    </div>
+
+    <!-- 查看凭据 -->
+    <Dialog
+      :open="!!revealed" :title="revealed?.name || '未命名密钥'"
+      :description="revealed ? `${revealed.id} · ${revealed.revoked ? '已撤销' : '有效'} · 创建于 ${fmtTime(revealed.createdAt)}` : ''"
+      class="max-w-xl"
+      @update:open="(v) => { if (!v) revealed = null }"
+    >
+      <div v-if="revealed" class="space-y-3">
+        <p class="rounded-md border border-warning/25 bg-warning/[0.07] px-3 py-2 text-[11.5px] leading-relaxed text-warning">
+          这把密钥同时用于 REST / MCP 的 Bearer 鉴权与 S3 SigV4 签名。明文可随时再来查看，请勿提交到公开仓库或聊天记录。
+        </p>
+
+        <div class="space-y-2.5 text-[11.5px]">
           <div>
-            <div class="eyebrow">New Credential</div>
-            <h2 class="section-title">创建 API 密钥</h2>
-            <p class="section-note">生成的密钥归属当前登录用户，用于 REST 与 S3 双通道鉴权</p>
-          </div>
-          <button class="icon-btn" @click="drawer = false">✕</button>
-        </div>
-        <div class="drawer-body">
-          <div class="form-grid">
-            <div class="field" style="grid-column:1/-1">
-              <label>密钥名称 <span class="req">*</span></label>
-              <input v-model="form.name" placeholder="例如 laptop-awscli / ci-pipeline" />
+            <div class="flex items-center justify-between">
+              <span class="text-muted-foreground">API Key / Bearer</span>
+              <button class="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-foreground" @click="showSecret = !showSecret">
+                <component :is="showSecret ? EyeOff : Eye" class="size-3.5" />{{ showSecret ? '隐藏' : '显示' }}
+              </button>
             </div>
-            <div class="field">
-              <label>有效期（天）</label>
-              <input v-model.number="form.expiresInDays" type="number" min="0" />
-              <div class="field-help">0 表示永不过期；到期后密钥自动失效</div>
+            <div class="mt-1 flex items-center gap-1.5">
+              <code class="min-w-0 flex-1 break-all rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[10.5px]">{{ showSecret ? revealed.secretAccessKey : '••••••••••••••••••••••••' }}</code>
+              <Button size="icon-sm" variant="outline" aria-label="复制" @click="copy(revealed.secretAccessKey, 'reveal-bearer')"><Copy /></Button>
             </div>
           </div>
-          <div class="field-group">
-            <h3 class="field-group-title">作用域（可选）</h3>
-            <p class="section-note" style="margin-bottom:14px">留空 = 继承用户当前全部权限；选中后密钥仅能执行这些操作，适合最小权限下发。</p>
-            <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:10px">
-              <label v-for="p in allPerms" :key="p" class="checkbox-row" style="padding:8px 10px;border:1px solid var(--line);background:var(--surface);cursor:pointer">
-                <input type="checkbox" :checked="form.scopes.includes(p)" @change="toggleScope(p)" />
-                <span class="mono tiny">{{ p }}</span>
-              </label>
+          <div>
+            <span class="text-muted-foreground">AccessKeyId</span>
+            <div class="mt-1 flex items-center gap-1.5">
+              <code class="min-w-0 flex-1 break-all rounded-md border bg-muted/40 px-2 py-1.5 font-mono text-[10.5px]">{{ revealed.accessKeyId }}</code>
+              <Button size="icon-sm" variant="outline" aria-label="复制" @click="copy(revealed.accessKeyId, 'reveal-access')"><Copy /></Button>
             </div>
-            <div style="margin-top:12px"><button class="btn btn--quiet btn--sm" @click="form.scopes = []">清空选择（继承全部权限）</button></div>
           </div>
-          <div class="divider"></div>
-          <div class="alert-strip" style="margin:0">
-            <div style="font-family:var(--serif);font-size:20px;color:var(--accent)">i</div>
-            <div class="alert-strip-body">创建后可在密钥列表随时点「查看」获取明文，不需要一次性保存；仅本人与管理员登录后可见。</div>
+          <div class="grid gap-1 sm:grid-cols-[7rem_1fr] sm:gap-2">
+            <span class="text-muted-foreground">Endpoint / Region</span>
+            <span class="break-all font-mono text-[10.5px]">{{ fullEndpoint }} · {{ revealed.region || region }}</span>
+          </div>
+          <div class="grid gap-1 sm:grid-cols-[7rem_1fr] sm:gap-2">
+            <span class="text-muted-foreground">状态 / 作用域</span>
+            <span>{{ revealed.revoked ? '已撤销' : '有效' }} · {{ (revealed.scopes || []).length ? revealed.scopes.join(', ') : '继承用户全部权限' }}<span v-if="revealed.expiresAt"> · 到期 {{ fmtTime(revealed.expiresAt) }}</span></span>
           </div>
         </div>
-        <div class="drawer-foot">
-          <button class="btn" @click="drawer = false">取消</button>
-          <button class="btn btn--primary" :disabled="saving" @click="create">{{ saving ? '生成中…' : '生成密钥' }}</button>
+
+        <div>
+          <p class="mb-1.5 text-[10.5px] font-medium tracking-wide text-muted-foreground">可直接复制的对接代码</p>
+          <CodeBlock :code="revealCode" label="credentials" max-height="260px" />
         </div>
-      </aside>
-    </template>
+      </div>
+      <template #footer>
+        <Button size="sm" variant="ghost" class="mr-auto" @click="copy(revealCode, 'reveal-code')"><Copy />复制对接代码</Button>
+        <Button size="sm" variant="outline" @click="go('mcp')">MCP 示例<ExternalLink /></Button>
+        <Button size="sm" @click="revealed = null">关闭</Button>
+      </template>
+    </Dialog>
+
+    <!-- 创建 -->
+    <Sheet v-model:open="drawer" title="创建 API 密钥" description="生成的密钥归属当前登录用户，用于 REST 与 S3 双通道鉴权。">
+      <div class="grid gap-4">
+        <Field label="密钥名称" required>
+          <Input v-model="form.name" placeholder="例如 laptop-awscli / ci-pipeline" />
+        </Field>
+        <Field label="有效期（天）" hint="0 表示永不过期；到期后密钥自动失效">
+          <Input v-model.number="form.expiresInDays" type="number" min="0" />
+        </Field>
+
+        <div>
+          <div class="flex items-center justify-between">
+            <p class="text-xs font-medium text-foreground/80">作用域（可选）</p>
+            <button v-if="form.scopes.length" class="text-[11px] text-muted-foreground hover:text-foreground" @click="form.scopes = []">清空</button>
+          </div>
+          <p class="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">留空 = 继承用户当前全部权限；选中后密钥仅能执行这些操作。</p>
+          <div class="mt-2.5 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            <button
+              v-for="p in allPerms" :key="p" type="button"
+              class="flex items-center gap-2 rounded-md border px-2.5 py-2 text-left font-mono text-[10.5px] transition-colors"
+              :class="form.scopes.includes(p) ? 'border-primary/40 bg-primary/[0.06] text-primary' : 'bg-background text-muted-foreground hover:border-foreground/20'"
+              @click="toggleScope(p)"
+            >
+              <span class="grid size-3.5 shrink-0 place-items-center rounded-[3px] border" :class="form.scopes.includes(p) ? 'border-primary bg-primary text-primary-foreground' : 'border-input'">
+                <CircleCheck v-if="form.scopes.includes(p)" class="size-2.5" />
+              </span>
+              {{ p }}
+            </button>
+          </div>
+        </div>
+      </div>
+      <p class="mt-4 rounded-md border bg-muted/40 px-3 py-2 text-[11.5px] leading-relaxed text-muted-foreground">
+        创建后可在密钥列表随时点「查看」获取明文，不需要一次性保存；仅本人与管理员登录后可见。
+      </p>
+      <template #footer>
+        <Button variant="outline" @click="drawer = false">取消</Button>
+        <Button :disabled="saving" @click="create">{{ saving ? '生成中…' : '生成密钥' }}</Button>
+      </template>
+    </Sheet>
   </div>
 </template>

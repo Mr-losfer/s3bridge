@@ -2,7 +2,7 @@
 
 > **插件化的多源上传聚合网关** —— 把任意第三方上传接口转换成统一标准输出，再以 **S3 兼容接口** 对外提供；配套多用户权限后台、插件热配置、健康检测告警与完整 MCP 能力。
 
-语言：**Go（后端，零外部依赖，标准库实现）** · Vue 3 + Vite（后台，构建产物嵌入单二进制）
+语言：**Go（后端，零外部依赖，标准库实现）** · Vue 3 + Vite + Tailwind CSS 4（后台，shadcn/ui 风格，构建产物嵌入单二进制）
 
 仓库：[github.com/Mr-losfer/s3bridge](https://github.com/Mr-losfer/s3bridge)
 

@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ImageOff } from 'lucide-vue-next'
 import { getToken } from '../api'
 
 // 缩略图按需加载：进入视口才拉取对象数据，避免一次性请求几百张图。
@@ -58,9 +59,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="el" class="media-thumb">
-    <img v-if="src" :src="src" :alt="alt" loading="lazy" />
-    <div v-else-if="failed" class="media-icon" title="缩略图加载失败">⚠</div>
-    <span v-else class="spinner"></span>
+  <div ref="el" class="flex aspect-[4/3] w-full items-center justify-center overflow-hidden bg-muted/60">
+    <img v-if="src" :src="src" :alt="alt" loading="lazy" class="size-full object-cover transition-transform duration-300 group-hover:scale-[1.02]" />
+    <ImageOff v-else-if="failed" class="size-5 text-muted-foreground/60" />
+    <span v-else class="size-4 animate-spin rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/70" />
   </div>
 </template>
