@@ -62,7 +62,7 @@ async function submit() {
           <div v-for="f in [
             { icon: Layers, title: '声明式插件', desc: '请求模板 + 响应映射，保存即生效' },
             { icon: Database, title: 'S3 标准接口', desc: 'AWS SigV4，现有客户端零改造接入' },
-            { icon: SquareTerminal, title: 'MCP 全掌控', desc: '45 个工具覆盖插件开发与运维' },
+            { icon: SquareTerminal, title: 'MCP 全掌控', desc: '49 个工具覆盖插件开发与运维' },
           ]" :key="f.title" class="flex items-center gap-3 text-white/75">
             <div class="grid size-8 shrink-0 place-items-center rounded-md bg-white/[0.06] ring-1 ring-white/10">
               <component :is="f.icon" class="size-4" :stroke-width="1.6" />

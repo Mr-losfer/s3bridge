@@ -6,10 +6,12 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/app"
 	"github.com/Mr-losfer/s3bridge/internal/mcp"
+	"github.com/Mr-losfer/s3bridge/internal/obs"
 	"github.com/Mr-losfer/s3bridge/internal/store"
 	"github.com/Mr-losfer/s3bridge/internal/web"
 )
@@ -19,6 +21,13 @@ type Server struct {
 	router *Router
 	mcp    *mcp.Server
 	web    http.Handler
+	root   http.Handler
+
+	// 存储画像的短时缓存：内存聚合是 O(对象数)，管理页 20 秒刷新一次，
+	// 多个标签页/并发刷新时没必要重复计算。
+	storageMu    sync.Mutex
+	storageAt    time.Time
+	storageCache *obs.StorageReport
 }
 
 func New(core *app.Core) *Server {
@@ -27,6 +36,7 @@ func New(core *app.Core) *Server {
 		mcp: mcp.New(core), web: web.Handler(),
 	}
 	s.routes()
+	s.root = s.observe(http.HandlerFunc(s.dispatch))
 	return s
 }
 
@@ -90,6 +100,17 @@ func (s *Server) routes() {
 	r.Handle("GET", "/api/objects/download", s.download, store.PermUploadRead)
 	r.Handle("DELETE", "/api/objects", s.deleteObject, store.PermUploadWrite)
 
+	// 监控中心（运维数据，仅系统管理员）
+	r.Handle("GET", "/api/monitor/summary", s.monitorSummary, store.PermSystemManage)
+	r.Handle("GET", "/api/monitor/events", s.monitorEvents, store.PermSystemManage)
+	r.Handle("GET", "/api/monitor/storage", s.monitorStorage, store.PermSystemManage)
+	r.Handle("GET", "/api/monitor/storage/scan", s.monitorStorageScanState, store.PermSystemManage)
+	r.Handle("POST", "/api/monitor/storage/scan", s.monitorStorageScan, store.PermSystemManage)
+
+	// 全站图片相册（跨桶流式浏览）
+	r.Handle("GET", "/api/gallery", s.gallery, store.PermUploadRead)
+	r.Handle("GET", "/api/objects/thumb", s.objectThumb, store.PermUploadRead)
+
 	// 存储桶
 	r.Handle("GET", "/api/buckets", s.namedTool("bucket_list"), store.PermBucketRead)
 	r.Handle("POST", "/api/buckets", s.namedTool("bucket_create"), store.PermBucketWrite)
@@ -118,6 +139,11 @@ func (s *Server) routes() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.root.ServeHTTP(w, r)
+}
+
+// dispatch 按路径前缀分流到 REST、S3、MCP 与静态资源。
+func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	switch {
 	case p == "/healthz", p == "/api/health":

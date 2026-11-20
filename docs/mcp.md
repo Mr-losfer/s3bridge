@@ -61,7 +61,7 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ---
 
-## 2. 工具清单（45 个）
+## 2. 工具清单（49 个）
 
 ### 站点与系统
 
@@ -77,6 +77,17 @@ curl -s -X POST http://localhost:8080/mcp \
 | `system_update_dismiss` | 忽略指定版本的新版本弹窗（首页卡片仍显示） | `tag` |
 
 > 版本更新工具与后台「版本更新卡片」共用同一份状态机。`site_info` 也会返回 `updateAvailable` / `latestVersion`，便于 AI 巡检时一并判断是否需要升级。
+
+### 监控与相册
+
+| 工具 | 说明 | 主要参数 |
+| --- | --- | --- |
+| `monitor_summary` | **监控总览**：请求量、错误率、延迟分位（P50/P95/P99）、上传与流量、最慢/最易错接口、运行时健康（goroutine/内存/磁盘）与最近异常 | `range`（`1h`/`6h`/`24h`/`7d`/`30d`） |
+| `monitor_storage` | **存储画像**：桶容量排行与健康分、类型分布、Top 大文件、重复内容、断链、孤儿文件、超期对象与磁盘占用；可触发深度体检 | `scan` `days` |
+| `monitor_errors` | **异常日志**：按级别、分类与关键字过滤，返回状态码、路由、耗时、操作者与错误消息 | `level` `category` `q` `seconds` `limit` |
+| `gallery_list` | **全站图片巡视**：跨桶按时间倒序列出图片，含缩略图地址，便于快速判断站点素材 | `limit` `bucket` `q` |
+
+> 这四个工具都只读，不需要额外授权即可让 Agent 做「先看监控、再看日志、最后给结论」的巡检。指标口径与异常分类见[监控中心文档](monitoring.md)，相册的游标分页与缩略图缓存见[图片相册文档](gallery.md)。
 
 ### 插件开发与运维
 
@@ -159,6 +170,16 @@ curl -s -X POST http://localhost:8080/mcp \
 {"name":"plugin_list","arguments":{}}
 {"name":"alerts_list","arguments":{"limit":10}}
 ```
+
+### 用监控数据做一次巡检
+
+```json
+{"name":"monitor_summary","arguments":{"range":"24h"}}
+{"name":"monitor_errors","arguments":{"level":"error","seconds":3600,"limit":20}}
+{"name":"monitor_storage","arguments":{"scan":false}}
+```
+
+判断顺序：先看 `errRate` 与 P95 是否异常，再看错误日志里 5xx 的 `route` 与 `message`，最后看存储是否有断链或磁盘逼近上限。需要精确核对磁盘与元数据是否一致时，再传 `scan=true` 做深度体检（耗时随对象数增长，不要频繁调用）。
 
 ### 临时 Token 过期导致插件标红，如何修复
 

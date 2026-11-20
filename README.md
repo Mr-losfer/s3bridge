@@ -22,7 +22,7 @@ S3Bridge 把这些差异收敛到**一个插件文件**里：插件作者只写�
         │
         ├── 后台管理页面（多用户 / 权限 / 插件 / 告警 / 上传测试）
         ├── S3 兼容接口（SigV4，每用户独立 API Key，aws-cli / boto3 / SDK 直连）
-        └── MCP Server（37 个工具，AI 客户端直接运维与开发调试）
+        └── MCP Server（49 个工具，AI 客户端直接运维与开发调试）
 ```
 
 ---
@@ -55,9 +55,11 @@ docker run -d --name s3bridge \
 | **S3 接口** | SigV4 校验（含 Presigned URL）、`ListBuckets` / `PutObject` / `GetObject` / `HeadObject` / `DeleteObject` / `ListObjectsV2` / `CreateBucket`，标准 XML 响应与错误码 |
 | **多用户与权限** | RBAC 三角色 + 逐项授予/撤销；每用户独立 API Key（同时是 S3 凭据与 REST Bearer），支持作用域与有效期，可随时撤销 |
 | **存储桶** | 创建 / 编辑 / 公开读 / 删除，对象数与容量统计，与 S3 接口双向同步 |
+| **监控中心** | 全站请求指标（3 档时间线 / 12 小时到 30 天）、错误率、P50/P95/P99、慢接口与易错接口排行、运行时健康（goroutine / 内存 / 磁盘）、结构化**异常日志**（7 类异常、按路由模板聚合）、**存储体检**（桶健康分、类型分布、Top 大文件、重复内容、断链、孤儿文件、超期与即将过期、磁盘占用） |
+| **图片相册** | **全站跨桶图墙**，网格 / 瀑布流两种卡片布局切换、无限滚动、灯箱；游标分页保证深翻页恒定耗时，按需生成并磁盘缓存缩略图 |
 | **版本自更新** | 每 6 小时从本仓库 GitHub Releases 检测新版（**默认经 gh-proxy 加速，403/超时自动回退直连**）；首页卡片 + 新版本弹窗，更新要点按重要程度高亮；管理员点「立即更新」自动完成下载、SHA256 校验、备份、原子替换、原地重启与页面刷新，失败自动回滚 |
-| **MCP** | 37 个工具 + 4 个文档资源，stdio 与 Streamable HTTP 双通道；后台每个按钮都走同一份工具实现，AI 与人工操作结果/审计完全一致 |
-| **文档中心** | 插件开发、S3 接口、MCP、安装部署四份文档随二进制 embed，后台 / MCP / 仓库三处同源 |
+| **MCP** | 49 个工具 + 4 个文档资源，stdio 与 Streamable HTTP 双通道；后台每个按钮都走同一份工具实现，AI 与人工操作结果/审计完全一致 |
+| **文档中心** | 插件开发、S3 接口、MCP、安装部署、监控中心、图片相册六份文档随二进制 embed，后台 / MCP / 仓库三处同源 |
 
 ---
 
@@ -72,10 +74,12 @@ docker run -d --name s3bridge \
 | 告警中心 | 未确认优先，一键确认 |
 | 上传测试 | 拖拽上传、进度、统一标准输出与签名到期时间 |
 | 上传列表 | **图片网格流式视图 + 懒加载缩略图**，点击弹出「左图右数据」灯箱（键盘 ← → 切换）；按 bucket / 类型 / 插件 / 关键字筛选 |
+| 监控中心 | 总览（请求/错误率/延迟分位曲线、慢接口与易错接口、运行时健康）、存储（桶健康分、类型分布、Top 大文件、重复、断链、孤儿、磁盘）、接口排行、**异常日志**（级别 + 7 类分类 + 关键字检索，20 秒自动刷新） |
+| 图片相册 | **全站图墙**，网格 / 瀑布流一键切换（记忆偏好）、时间 / 桶 / 关键字筛选、无限滚动、灯箱大图 |
 | 存储桶 | 桶管理 + S3 接入示例 |
 | API 密钥 | 创建、随时查看明文、作用域、有效期、撤销、S3 接入点 |
 | MCP 能力 | **当前用户 API Key 明文 + 现成对接代码**、工具清单、在线调试台、Claude Desktop / Cursor 接入配置 |
-| 文档中心 | 四份文档在线渲染 |
+| 文档中心 | 六份文档在线渲染 |
 | 用户与权限 | 用户管理、角色默认权限、权限矩阵（额外授予 / 撤销） |
 | 系统设置 | 站点名、默认插件、健康检测总开关、告警开关、公告、修改密码 |
 
@@ -168,14 +172,15 @@ s3bridge/
 │   ├── health/            # 每插件独立定时检测调度器
 │   ├── updater/           # Releases 检测、更新要点解析、SHA256 校验与自动替换重启
 │   ├── upload/            # 统一上传、按类型与 bucket 归档
+│   ├── obs/               # 指标采集、事件日志、存储体检、缩略图缓存
 │   ├── s3gateway/         # SigV4 校验 + S3 REST 接口（XML）
-│   ├── mcp/               # JSON-RPC 协议 + 37 个工具
+│   ├── mcp/               # JSON-RPC 协议 + 49 个工具
 │   ├── docs/              # 文档 embed（files/ 为 docs/ 的同步副本）
-│   ├── api/               # REST 路由、中间件、处理器
+│   ├── api/               # REST 路由、采集中间件、处理器
 │   ├── app/               # 依赖装配
 │   └── web/               # 前端 embed（dist/ 为构建产物，随仓库提交）
 ├── web/src/               # Vue 3 后台源码
-├── docs/                  # 四份正式文档（唯一源）
+├── docs/                  # 六份正式文档（唯一源）
 ├── deployments/           # Dockerfile / Compose / Caddyfile / systemd unit
 ├── .github/workflows/     # CI 与 Release 流水线
 ├── .goreleaser.yml        # 多平台打包
@@ -207,6 +212,7 @@ make docker       # 构建镜像
 ## 质量保障
 
 - 表驱动单元测试、端到端集成测试（登录 → 插件配置 → 上传 → S3 取回 → MCP）、SigV4 客户端交叉验证、`httptest` 上游 mock
+- 性能有基准兜底：埋点 `BenchmarkRecord` 约 148 ns/op、**0 次内存分配**，概览聚合约 15 µs，存储画像 2 万对象约 12.5 ms；16 并发压测下监控接口 P95 < 40 ms
 - `go test -race ./...` 竞态检测；调度器 goroutine 均满足「可取消、可等待、有所有者」
 - CI：gofmt / vet / test -race / coverage / 前端构建 / 文档同步 / govulncheck / 冒烟启动
 - Release：GoReleaser 构建 5 个平台压缩包 + checksums，Actions 推送 linux/amd64 + linux/arm64 多架构镜像到 GHCR
@@ -220,8 +226,10 @@ make docker       # 构建镜像
 | --- | --- |
 | [插件开发文档](docs/plugin-development.md) | 契约、ParamField 参考、临时参数机制、完整示例、差量/全量修改语义、调试与测试 |
 | [S3 开放接口文档](docs/s3-api.md) | 每用户 API Key、SigV4、支持的 API、aws-cli / boto3 / Go / Node 示例 |
-| [MCP 能力与工具清单](docs/mcp.md) | 接入配置、37 个工具、典型工作流、Resources |
+| [MCP 能力与工具清单](docs/mcp.md) | 接入配置、49 个工具、典型工作流、Resources |
 | [安装与部署](docs/installation.md) | Docker 单容器、Compose、从仓库构建、Linux systemd、版本矩阵、环境变量、故障排查 |
+| [监控中心与存储体检](docs/monitoring.md) | 性能开销、指标口径与降采样、延迟分位算法、异常分类与产生条件、存储体检项与两级体检、排查路径 |
+| [全站图片相册](docs/gallery.md) | 两种布局、游标分页为何优于 offset、缩略图生成与缓存策略、权限可见性 |
 
 以上文档同时出现在后台「文档中心」与 MCP 的 `plugin_docs` / `s3_docs` / `installation_docs` 工具及 `docs://` 资源中，永远同源。
 

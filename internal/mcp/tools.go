@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/auth"
 	"github.com/Mr-losfer/s3bridge/internal/docs"
+	"github.com/Mr-losfer/s3bridge/internal/obs"
 	"github.com/Mr-losfer/s3bridge/internal/plugin"
 	"github.com/Mr-losfer/s3bridge/internal/plugins/workbuddy"
 	"github.com/Mr-losfer/s3bridge/internal/store"
@@ -70,6 +72,22 @@ func (s *Server) Tools() []Tool {
 			InputSchema: schema(map[string]any{})},
 		{Name: "system_update_dismiss", Description: "忽略指定版本的新版本弹窗（首页更新卡片仍然显示）",
 			InputSchema: schema(map[string]any{"tag": strProp("要忽略的版本号，例如 v1.1.0")}, "tag")},
+
+		{Name: "monitor_summary", Description: "查看监控总览：请求量、错误率、延迟分位（P50/P95/P99）、上传与流量、最慢/最易错接口、运行时健康（goroutine/内存/磁盘）与最近异常；range 支持 1h/6h/24h/7d/30d",
+			InputSchema: schema(map[string]any{"range": strProp("时间范围：1h/6h/24h/7d/30d，默认 24h")})},
+		{Name: "monitor_storage", Description: "查看存储画像：桶容量排行、文件类型分布、Top 大文件、重复内容、断链（元数据有文件无）、孤儿文件（文件有元数据无）、超期对象与磁盘占用；可触发深度体检",
+			InputSchema: schema(map[string]any{"scan": boolProp("是否触发一次深度体检（异步，默认 false）"), "days": numProp("超期判定天数，默认取系统保留策略")})},
+		{Name: "monitor_errors", Description: "查询异常日志：按级别（error/warn）、分类（auth/upload/plugin/s3/storage/system/request）与关键字过滤，返回状态码、路由、耗时、操作者与错误消息",
+			InputSchema: schema(map[string]any{
+				"level": strProp("级别：error 或 warn"), "category": strProp("分类：auth/upload/plugin/s3/storage/system/request"),
+				"q": strProp("关键字（匹配消息、路由、操作者）"), "limit": numProp("返回条数，默认 30"),
+				"seconds": numProp("只查最近 N 秒"),
+			})},
+		{Name: "gallery_list", Description: "按时间倒序列出全站图片（跨存储桶），返回文件名、桶、对象键、大小、上传者与缩略图地址，便于快速巡视相册",
+			InputSchema: schema(map[string]any{
+				"bucket": strProp("只看指定存储桶"), "q": strProp("按文件名/对象键搜索"),
+				"limit": numProp("返回条数，默认 24，最大 100"),
+			})},
 
 		{Name: "plugin_list", Description: "查看插件列表（按权重从高到低排序，即实际调度顺序；含状态、版本、可承接文件类型、参数警告）",
 			InputSchema: schema(map[string]any{})},
@@ -389,6 +407,113 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 		var settings store.Settings
 		_ = c.Store.View(func(st *store.State) error { settings = st.Settings; return nil })
 		return ok(settings)
+
+	// ---------- 监控 / 相册 ----------
+	case "monitor_summary":
+		if err := perm(store.PermSystemManage); err != nil {
+			return fail(err)
+		}
+		if c.Obs == nil {
+			return fail(errors.New("监控采集未启用"))
+		}
+		rg := obs.ParseRange(argString(args, "range"))
+		sum := c.Obs.Summary(rg, time.Now())
+		recent, _ := c.Obs.Events(obs.EventFilter{Level: obs.LevelError, Limit: 5, Since: time.Now().Add(-24 * time.Hour)})
+		return ok(map[string]any{"summary": sum, "recent": recent, "hint": "series 为时序点，slowest/errRoutes 分别是慢接口与错误接口排行"})
+
+	case "monitor_storage":
+		if err := perm(store.PermSystemManage); err != nil {
+			return fail(err)
+		}
+		var objects []store.Object
+		var buckets []store.Bucket
+		var settings store.Settings
+		_ = c.Store.View(func(st *store.State) error {
+			objects = append(objects, st.Objects...)
+			buckets = append(buckets, st.Buckets...)
+			settings = st.Settings
+			return nil
+		})
+		days := argInt(args, "days", settings.UploadRetentionDays)
+		deep := argBool(args["scan"], false)
+		opts := obs.AuditOptions{RetentionDays: days, TopLimit: 15}
+		if deep {
+			opts.ObjectDir = c.Cfg.ObjectDir
+			opts.MaxScanFiles = 200000
+			opts.TopLimit = 20
+		}
+		rep := obs.BuildStorageReport(objects, buckets, opts)
+		if !deep {
+			rep.Disk = obs.DiskStats(c.Cfg.ObjectDir)
+		}
+		return ok(map[string]any{"report": rep, "deepScan": deep,
+			"hint": "deepScan=false 时只做内存聚合；传 scan=true 可检测孤儿文件与断链，耗时随对象数增长"})
+
+	case "monitor_errors":
+		if err := perm(store.PermSystemManage); err != nil {
+			return fail(err)
+		}
+		if c.Obs == nil {
+			return fail(errors.New("监控采集未启用"))
+		}
+		f := obs.EventFilter{
+			Level: argString(args, "level"), Category: argString(args, "category"),
+			Query: argString(args, "q"), Limit: argInt(args, "limit", 30),
+		}
+		if secs := argInt(args, "seconds", 0); secs > 0 {
+			f.Since = time.Now().Add(-time.Duration(secs) * time.Second)
+		}
+		items, total := c.Obs.Events(f)
+		return ok(map[string]any{"items": items, "total": total, "categories": obs.CategoryLabels})
+
+	case "gallery_list":
+		if err := perm(store.PermUploadRead); err != nil {
+			return fail(err)
+		}
+		limit := argInt(args, "limit", 24)
+		if limit <= 0 || limit > 100 {
+			limit = 24
+		}
+		bucket := argString(args, "bucket")
+		keyword := strings.ToLower(argString(args, "q"))
+		owner := ""
+		isAdmin := p != nil && p.IsAdmin()
+		if p != nil {
+			owner = p.UserID
+		}
+		out := []map[string]any{}
+		total := 0
+		var totalBytes int64
+		_ = c.Store.View(func(st *store.State) error {
+			for i := len(st.Objects) - 1; i >= 0; i-- {
+				o := st.Objects[i]
+				if o.Category != store.CategoryImage {
+					continue
+				}
+				if !isAdmin && o.OwnerID != owner {
+					continue
+				}
+				if bucket != "" && o.Bucket != bucket {
+					continue
+				}
+				if keyword != "" && !strings.Contains(strings.ToLower(o.FileName+o.ObjectKey), keyword) {
+					continue
+				}
+				total++
+				totalBytes += o.Size
+				if len(out) >= limit {
+					continue
+				}
+				out = append(out, map[string]any{
+					"id": o.ID, "bucket": o.Bucket, "objectKey": o.ObjectKey,
+					"fileName": o.FileName, "size": o.Size, "mimeType": o.MimeType,
+					"createdAt": o.CreatedAt, "ownerId": o.OwnerID,
+					"thumb": "/api/objects/thumb?bucket=" + url.QueryEscape(o.Bucket) + "&key=" + url.QueryEscape(o.ObjectKey) + "&w=480",
+				})
+			}
+			return nil
+		})
+		return ok(map[string]any{"items": out, "total": total, "totalBytes": totalBytes})
 
 	// ---------- 插件 ----------
 	case "plugin_list":

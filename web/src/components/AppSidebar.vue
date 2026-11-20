@@ -1,7 +1,7 @@
 <script setup>
 import {
-  LayoutDashboard, Bell, Blocks, Upload, Images, Database, KeyRound, SquareTerminal,
-  BookOpen, Users, Settings, ArrowUpCircle, Boxes,
+  LayoutDashboard, Activity, Bell, Blocks, Upload, Images, ImagesIcon, Database, KeyRound,
+  SquareTerminal, BookOpen, Users, Settings, ArrowUpCircle, Boxes,
 } from 'lucide-vue-next'
 import { route, go, navGroups } from '@/router'
 import { session, can } from '@/session'
@@ -13,6 +13,8 @@ const emit = defineEmits(['navigate'])
 
 const icons = {
   dashboard: LayoutDashboard,
+  activity: Activity,
+  gallery: ImagesIcon,
   bell: Bell,
   blocks: Blocks,
   upload: Upload,

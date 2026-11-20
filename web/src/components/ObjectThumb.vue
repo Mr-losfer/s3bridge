@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue'
+import { ref, onMounted, onBeforeUnmount, computed } from 'vue'
 import { ImageOff } from 'lucide-vue-next'
 import { getToken } from '../api'
 
@@ -9,6 +9,11 @@ const props = defineProps({
   bucket: { type: String, required: true },
   objectKey: { type: String, required: true },
   alt: { type: String, default: '' },
+  // 0 表示请求原图；大于 0 时走后端缩略图端点（JPEG，体积小一个量级）。
+  thumbWidth: { type: Number, default: 0 },
+  // 'auto' 时高度由图片自身比例决定，供瀑布流布局使用。
+  aspect: { type: String, default: '4/3' },
+  fit: { type: String, default: 'cover' },
 })
 const emit = defineEmits(['loaded'])
 
@@ -18,12 +23,24 @@ const failed = ref(false)
 const loading = ref(false)
 let observer = null
 
+const boxStyle = computed(() => (props.aspect === 'auto' ? {} : { aspectRatio: props.aspect }))
+const imgClass = computed(() => [
+  'w-full transition-transform duration-300 group-hover:scale-[1.02]',
+  props.aspect === 'auto' ? 'h-auto' : 'size-full',
+  props.fit === 'contain' ? 'object-contain' : 'object-cover',
+])
+
 async function fetchImage() {
   if (src.value || loading.value) return
   loading.value = true
   try {
     const q = new URLSearchParams({ bucket: props.bucket, key: props.objectKey })
-    const res = await fetch('/api/objects/download?' + q.toString(), {
+    let url = '/api/objects/download?'
+    if (props.thumbWidth > 0) {
+      url = '/api/objects/thumb?'
+      q.set('w', String(props.thumbWidth))
+    }
+    const res = await fetch(url + q.toString(), {
       headers: { Authorization: 'Bearer ' + getToken() },
     })
     if (!res.ok) throw new Error('HTTP ' + res.status)
@@ -59,8 +76,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="el" class="flex aspect-[4/3] w-full items-center justify-center overflow-hidden bg-muted/60">
-    <img v-if="src" :src="src" :alt="alt" loading="lazy" class="size-full object-cover transition-transform duration-300 group-hover:scale-[1.02]" />
+  <div
+    ref="el"
+    class="flex w-full items-center justify-center overflow-hidden bg-muted/60"
+    :class="aspect === 'auto' && !src ? 'h-40' : ''"
+    :style="boxStyle"
+  >
+    <img v-if="src" :src="src" :alt="alt" loading="lazy" :class="imgClass" />
     <ImageOff v-else-if="failed" class="size-5 text-muted-foreground/60" />
     <span v-else class="size-4 animate-spin rounded-full border-2 border-muted-foreground/20 border-t-muted-foreground/70" />
   </div>

@@ -6,6 +6,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -181,9 +182,14 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	if matched == nil {
+		// 未匹配路径统一归为一个模板，避免扫描器/爬虫把 404 排行刷成上千行。
+		w.Header().Set("X-Route-Pattern", "/api/{unmatched}")
 		writeError(w, errf(http.StatusNotFound, "not_found", "接口不存在: %s %s", req.Method, req.URL.Path))
 		return
 	}
+
+	// 让采集中间件拿到路由模板与操作者，避免把 /api/plugins/{id} 拆成无数行。
+	w.Header().Set("X-Route-Pattern", matched.pattern)
 
 	ctx := &Ctx{W: w, R: req, Params: params, RequestID: requestID}
 	if !matched.public {
@@ -197,6 +203,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			return
 		}
 		ctx.Principal = p
+		// 就地替换 request 的 context：中间件与 handler 共享同一个 *http.Request，
+		// 因此采集层能在请求结束后读到操作者，无需再解析一次 Token。
+		*req = *req.WithContext(context.WithValue(req.Context(), ctxActorKey{}, p.Username))
 		for _, perm := range matched.perms {
 			if !p.Can(perm) {
 				writeError(w, errf(http.StatusForbidden, "forbidden", "权限不足：需要 %s", perm))

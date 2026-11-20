@@ -44,6 +44,8 @@ type Config struct {
 	Addr               string
 	DataDir            string
 	ObjectDir          string
+	ObsDir             string
+	ThumbDir           string
 	MasterKey          []byte
 	SessionSecret      []byte
 	BootstrapUser      string
@@ -103,6 +105,16 @@ func Load() (*Config, error) {
 	c.ObjectDir = filepath.Join(c.DataDir, "objects")
 	if err := os.MkdirAll(c.ObjectDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建对象目录: %w", err)
+	}
+	// 监控数据（指标快照、事件日志）与缩略图缓存同样落在数据目录，
+	// 随数据卷一起持久化，容器重建后曲线与告警仍可回溯。
+	c.ObsDir = filepath.Join(c.DataDir, "obs")
+	if err := os.MkdirAll(c.ObsDir, 0o700); err != nil {
+		return nil, fmt.Errorf("创建监控目录: %w", err)
+	}
+	c.ThumbDir = filepath.Join(c.DataDir, "thumbs")
+	if err := os.MkdirAll(c.ThumbDir, 0o700); err != nil {
+		return nil, fmt.Errorf("创建缩略图目录: %w", err)
 	}
 
 	key, err := loadMasterKey(c.DataDir)

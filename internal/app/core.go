@@ -11,6 +11,7 @@ import (
 	"github.com/Mr-losfer/s3bridge/internal/auth"
 	"github.com/Mr-losfer/s3bridge/internal/config"
 	"github.com/Mr-losfer/s3bridge/internal/health"
+	"github.com/Mr-losfer/s3bridge/internal/obs"
 	"github.com/Mr-losfer/s3bridge/internal/plugin"
 	"github.com/Mr-losfer/s3bridge/internal/plugins/workbuddy"
 	"github.com/Mr-losfer/s3bridge/internal/s3gateway"
@@ -29,6 +30,9 @@ type Core struct {
 	S3        *s3gateway.Gateway
 	Health    *health.Scheduler
 	Updater   *updater.Updater
+	Obs       *obs.Collector
+	Thumbs    *obs.ThumbCache
+	Auditor   *obs.Auditor
 	Version   string
 	StartedAt time.Time
 }
@@ -74,11 +78,24 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		return nil, fmt.Errorf("初始化版本更新器: %w", err)
 	}
 
-	return &Core{
+	core := &Core{
 		Cfg: cfg, Store: st, Auth: authSvc, Registry: reg, Plugins: mgr,
 		Uploads: uploads, S3: s3gw, Health: health.New(mgr), Updater: upd,
+		Auditor: obs.NewAuditor(),
 		Version: version, StartedAt: time.Now().UTC(),
-	}, nil
+	}
+	// 监控是增强能力：初始化失败只降级，不影响上传与 S3 主链路。
+	if col, err := obs.New(obs.Options{Dir: cfg.ObsDir}); err == nil {
+		core.Obs = col
+	} else {
+		slog.Warn("监控采集初始化失败，已降级", "err", err)
+	}
+	if thumbs, err := obs.NewThumbCache(cfg.ThumbDir, 2, 40<<20); err == nil {
+		core.Thumbs = thumbs
+	} else {
+		slog.Warn("缩略图缓存初始化失败，相册将回退原图", "err", err)
+	}
+	return core, nil
 }
 
 // Close 停止后台 goroutine 并释放资源。
@@ -88,6 +105,9 @@ func (c *Core) Close() error {
 	}
 	if c.Updater != nil {
 		c.Updater.Stop()
+	}
+	if c.Obs != nil {
+		_ = c.Obs.Close()
 	}
 	if c.Store != nil {
 		return c.Store.Close()

@@ -25,6 +25,8 @@ var titles = map[string]string{
 	"s3-api":             "S3 开放接口文档",
 	"mcp":                "MCP 能力与工具清单",
 	"installation":       "安装与部署",
+	"monitoring":         "监控中心与存储体检",
+	"gallery":            "全站图片相册",
 }
 
 // Get 按名称返回 Markdown 正文。

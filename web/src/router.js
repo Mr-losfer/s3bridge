@@ -26,6 +26,7 @@ export const navGroups = [
     label: '工作台',
     items: [
       { name: 'overview', label: '概览', icon: 'dashboard', perm: null },
+      { name: 'monitor', label: '监控中心', icon: 'activity', perm: 'system:manage' },
       { name: 'alerts', label: '告警中心', icon: 'bell', perm: 'plugin:read', badge: 'alerts' },
     ],
   },
@@ -35,6 +36,7 @@ export const navGroups = [
       { name: 'plugins', label: '插件管理', icon: 'blocks', perm: 'plugin:read' },
       { name: 'uploadtest', label: '上传测试', icon: 'upload', perm: 'upload:write' },
       { name: 'uploads', label: '上传列表', icon: 'images', perm: 'upload:read' },
+      { name: 'gallery', label: '图片相册', icon: 'gallery', perm: 'upload:read' },
       { name: 'buckets', label: '存储桶', icon: 'database', perm: 'bucket:read' },
     ],
   },

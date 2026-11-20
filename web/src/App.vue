@@ -23,11 +23,14 @@ import ApiKeys from './views/ApiKeys.vue'
 import Settings from './views/Settings.vue'
 import Docs from './views/Docs.vue'
 import Mcp from './views/Mcp.vue'
+import Monitor from './views/Monitor.vue'
+import Gallery from './views/Gallery.vue'
 
 const views = {
   overview: Overview, plugins: Plugins, plugin: PluginDetail, alerts: Alerts,
   uploadtest: UploadTest, uploads: Uploads, buckets: Buckets, users: Users,
   keys: ApiKeys, settings: Settings, docs: Docs, mcp: Mcp,
+  monitor: Monitor, gallery: Gallery,
 }
 const view = computed(() => views[route.value.name] || Overview)
 const theme = ref(currentTheme())
