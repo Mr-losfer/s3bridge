@@ -1,9 +1,13 @@
 # S3Bridge 多阶段构建：Node 编译前端 → Go 静态编译 → 极小运行镜像
 # 用法（仓库根目录）：
 #   docker build -t s3bridge:local -f deployments/Dockerfile .
+#
+# 多架构构建说明：前两个阶段固定跑在 $BUILDPLATFORM（构建机架构），
+# 只有最后阶段按目标架构生成。否则 buildx 会让 pnpm install 与 go build
+# 在 QEMU 模拟的 arm64 下执行，单次构建从几分钟涨到一小时以上。
 
 # ---------- Stage 1: 前端 ----------
-FROM node:22-alpine AS web
+FROM --platform=$BUILDPLATFORM node:22-alpine AS web
 WORKDIR /src
 COPY web/package.json web/pnpm-lock.yaml ./web/
 RUN corepack enable && cd web && pnpm install --frozen-lockfile
@@ -12,17 +16,20 @@ COPY web/ ./web/
 RUN cd web && pnpm build
 
 # ---------- Stage 2: 后端 ----------
-FROM golang:1.27-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
 COPY go.mod ./
 COPY . .
 # 用 Stage 1  freshly 构建的前端产物覆盖仓库内预构建产物
 COPY --from=web /src/internal/web/dist ./internal/web/dist
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+# 交叉编译：在构建机架构上直接产出目标架构二进制，无需 QEMU。
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/s3bridge ./cmd/s3bridge \
- && CGO_ENABLED=0 GOOS=linux go build -trimpath \
+ && CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -ldflags "-s -w -X main.version=${VERSION}" \
       -o /out/s3bridge-mcp ./cmd/s3bridge-mcp
 
