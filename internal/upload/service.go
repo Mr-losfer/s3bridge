@@ -76,6 +76,10 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 		return nil, fmt.Errorf("创建临时文件: %w", err)
 	}
 	tmpName := tmp.Name()
+	// 插件是独立进程（工作目录为插件文件夹），必须给它绝对路径才能打开文件。
+	if abs, err := filepath.Abs(tmpName); err == nil {
+		tmpName = abs
+	}
 	defer func() { _ = os.Remove(tmpName) }()
 	hasher := sha256.New()
 	written, err := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(req.Reader, s.maxBytes+1))

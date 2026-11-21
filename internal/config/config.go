@@ -101,6 +101,11 @@ func Load() (*Config, error) {
 	if c.DefaultHealthEvery < 10*time.Second {
 		return nil, fmt.Errorf("%s 不得小于 10s，避免对第三方造成压力", EnvHealthInterval)
 	}
+	// 数据目录一律转成绝对路径：插件以子进程运行（工作目录是插件文件夹），
+	// 传给插件的临时文件路径、go.mod 里的 replace 目标都必须是绝对路径。
+	if abs, err := filepath.Abs(c.DataDir); err == nil {
+		c.DataDir = abs
+	}
 	if err := os.MkdirAll(c.DataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建数据目录: %w", err)
 	}

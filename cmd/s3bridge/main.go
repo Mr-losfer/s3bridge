@@ -42,6 +42,8 @@ func run() error {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	// 后台预编译插件：把编译耗时挪出上传链路，首次上传不再等 6 秒。
+	core.WarmPlugins(rootCtx)
 	core.Validity.Start(rootCtx)
 	if err := core.Health.Start(rootCtx); err != nil {
 		return fmt.Errorf("启动健康调度: %w", err)

@@ -4,9 +4,11 @@
 package app
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/auth"
@@ -41,6 +43,8 @@ type Core struct {
 	ProbeSecret []byte
 	Version     string
 	StartedAt   time.Time
+
+	warm sync.WaitGroup // 插件预编译协程，Close 时等待，避免退出时留下半截产物
 }
 
 // New 构建核心依赖，并执行首次启动的引导（管理员、默认 bucket、内置插件）。
@@ -119,6 +123,16 @@ func New(cfg *config.Config, version string) (*Core, error) {
 	return core, nil
 }
 
+// WarmPlugins 在后台预编译缺失产物的插件。
+// 失败只记日志：预编译是优化，不是启动的前置条件。
+func (c *Core) WarmPlugins(ctx context.Context) {
+	c.warm.Add(1)
+	go func() {
+		defer c.warm.Done()
+		c.Plugins.Warmup(ctx)
+	}()
+}
+
 // Close 停止后台 goroutine 并释放资源。
 func (c *Core) Close() error {
 	if c.Validity != nil {
@@ -129,6 +143,14 @@ func (c *Core) Close() error {
 	}
 	if c.Updater != nil {
 		c.Updater.Stop()
+	}
+	// 先等预编译结束（最多 20 秒），再关运行时，否则编译子进程会被强杀并留下临时文件。
+	waited := make(chan struct{})
+	go func() { c.warm.Wait(); close(waited) }()
+	select {
+	case <-waited:
+	case <-time.After(20 * time.Second):
+		slog.Warn("插件预编译未在 20 秒内结束，强制继续关闭")
 	}
 	if c.Runtime != nil {
 		_ = c.Runtime.Close()

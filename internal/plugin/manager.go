@@ -228,6 +228,48 @@ func (m *Manager) migrateLegacy() error {
 	return nil
 }
 
+// Warmup 预编译「已启用但产物缺失」的插件。
+// 目的是把编译耗时从「首次上传」挪到启动后的空闲时间：上传链路上不能出现几秒的抖动。
+func (m *Manager) Warmup(ctx context.Context) {
+	if m.rt == nil || m.rt.Toolchain() == "" {
+		return
+	}
+	var todo []store.Plugin
+	_ = m.st.View(func(st *store.State) error {
+		for _, p := range st.Plugins {
+			if p.Enabled {
+				todo = append(todo, p)
+			}
+		}
+		return nil
+	})
+	for _, p := range todo {
+		if ctx.Err() != nil {
+			return
+		}
+		dir := m.dirOf(&p)
+		if m.builtExists(dir) {
+			continue
+		}
+		// 源码本身不完整时不在启动阶段反复编译，等用户显式触发并看到编译器输出。
+		if _, err := LoadManifest(dir); err != nil {
+			continue
+		}
+		if err := EnsureGoMod(dir, p.ID, m.rt.SDKPath()); err != nil {
+			continue
+		}
+		start := time.Now()
+		res, err := m.rt.Build(ctx, p.ID, dir)
+		m.setBuildState(p.ID, res, err)
+		if err != nil {
+			slog.Warn("插件预编译失败", "plugin", p.ID, "err", err)
+			continue
+		}
+		slog.Info("插件预编译完成", "plugin", p.ID,
+			"ms", time.Since(start).Milliseconds(), "size", res.Size)
+	}
+}
+
 // ---------- 查询 ----------
 
 func (m *Manager) List() ([]View, error) {
