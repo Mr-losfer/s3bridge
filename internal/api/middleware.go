@@ -187,6 +187,10 @@ func parseErrorMessage(body []byte) string {
 }
 
 func shouldObserve(path string) bool {
+	// 内部探测每分钟一次，计入指标会稀释真实流量。
+	if strings.HasPrefix(path, "/api/internal/") {
+		return false
+	}
 	return strings.HasPrefix(path, "/api/") || path == "/mcp" || path == "/mcp/" ||
 		strings.HasPrefix(path, "/s3")
 }

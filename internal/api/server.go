@@ -79,10 +79,14 @@ func (s *Server) routes() {
 	r.Handle("POST", "/api/plugins/{id}/parse-token", s.namedTool("plugin_parse_token"), store.PermPluginWrite)
 	r.Handle("DELETE", "/api/plugins/{id}", s.namedTool("plugin_delete"), store.PermPluginWrite)
 
-	// 插件源码：Agent / 后台通过同一套 MCP 工具读写声明式插件定义
-	r.Handle("GET", "/api/plugins/{id}/source", s.namedTool("plugin_code_get"), store.PermPluginRead)
-	r.Handle("PUT", "/api/plugins/{id}/source", s.namedTool("plugin_code_upload"), store.PermPluginWrite)
-	r.Handle("PATCH", "/api/plugins/{id}/source", s.namedTool("plugin_code_patch"), store.PermPluginWrite)
+	// 插件源码：Go 文件夹模型，后台与 Agent 走同一套文件级工具
+	r.Handle("GET", "/api/plugins/{id}/files", s.namedTool("plugin_files"), store.PermPluginRead)
+	r.Handle("POST", "/api/plugins/{id}/files/rename", s.namedTool("plugin_file_rename"), store.PermPluginWrite)
+	r.Handle("GET", "/api/plugins/{id}/files/{name}", s.namedTool("plugin_file_read"), store.PermPluginRead)
+	r.Handle("PUT", "/api/plugins/{id}/files/{name}", s.namedTool("plugin_file_write"), store.PermPluginWrite)
+	r.Handle("DELETE", "/api/plugins/{id}/files/{name}", s.namedTool("plugin_file_delete"), store.PermPluginWrite)
+	r.Handle("POST", "/api/plugins/{id}/build", s.namedTool("plugin_build"), store.PermPluginWrite)
+	r.Handle("PUT", "/api/plugins/{id}/manifest", s.namedTool("plugin_manifest_update"), store.PermPluginWrite)
 	r.Handle("GET", "/api/plugins/{id}/export", s.namedTool("plugin_export"), store.PermPluginRead)
 
 	// 告警
@@ -108,6 +112,10 @@ func (s *Server) routes() {
 	r.Handle("POST", "/api/monitor/storage/scan", s.monitorStorageScan, store.PermSystemManage)
 
 	// 全站图片相册（跨桶流式浏览）
+	// 图片巡检专用的本机探测接口（HMAC + 回环地址双重校验）
+	r.Public("GET", "/api/internal/object-probe", s.objectProbe)
+	r.Public("HEAD", "/api/internal/object-probe", s.objectProbe)
+
 	r.Handle("GET", "/api/gallery", s.gallery, store.PermUploadRead)
 	r.Handle("GET", "/api/objects/thumb", s.objectThumb, store.PermUploadRead)
 

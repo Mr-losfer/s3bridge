@@ -34,8 +34,14 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -o /out/s3bridge-mcp ./cmd/s3bridge-mcp
 
 # ---------- Stage 3: 运行 ----------
+# ARG WITH_GO=1 会在镜像内放入 Go 工具链（约 +300 MB），用于在线编辑/编译插件源码。
+# 发布流程同时产出两份镜像：
+#   ghcr.io/<owner>/s3bridge:<version>       精简版，只能运行已编译好的插件二进制
+#   ghcr.io/<owner>/s3bridge:<version>-go    含 Go 1.21+，支持后台改源码即时编译
 FROM alpine:3.20
+ARG WITH_GO=0
 RUN apk add --no-cache ca-certificates tzdata wget \
+ && if [ "$WITH_GO" = "1" ]; then apk add --no-cache go; fi \
  && addgroup -S s3bridge \
  && adduser -S -G s3bridge s3bridge
 WORKDIR /app

@@ -1,427 +1,353 @@
 # 插件开发文档
 
-> S3Bridge 的核心思路：**一个插件 = 一段把第三方上传接口转换成统一标准输出的适配器**。
-> 新增一家第三方服务时只写插件代码，不改后台、不改前端、不改 MCP——因为配置表单、参数校验、文档和调试能力都由插件清单（`Manifest`）自动生成。
+> **v2.0 起插件就是 Go 程序。** 一个插件 = 一个文件夹，里面是 `plugin.json`（元信息与参数 Schema）
+> 加任意多个 `.go` 文件。服务端在运行时用 `go build` 把它编译成独立可执行文件，以子进程方式调用。
+> 因此你可以做**任意请求、任意 HTTP 方法（含 PUT/DELETE/multipart）、任意加解密与签名**，
+> 而不只是「填一个请求模板」——没有模板能表达的逻辑，写代码就行。
 
-> **两种开发方式，按需选择**：第 2～9 章是编译进二进制的 Go 插件（性能最好、可发布内置版本）；
-> **[第 10 章](#10-通过-mcp-完全掌控插件开发声明式插件源码) 是声明式插件源码 + MCP 全流程**——Agent 用 `plugin_create` / `plugin_code_upload` / `plugin_code_patch` 编写一份 JSON 定义即可创建、改码、校验、调试、上传验证并即时生效，无需重新编译或重启服务。若你的 Agent 需要完全掌控插件开发，直接看第 10 章。
+本文档按「读一份能跑的代码 → 动手改 → 调试 → 发布」的顺序组织：
 
----
-
-## 1. 架构与数据流
-
-```
-后台上传 / S3 PutObject / MCP upload_test
-        │
-        ▼
-  upload.Service（统一入口）
-        │  ① 选择插件（指定 ID 或健康优先）
-        │  ② 校验参数 + 解密敏感字段
-        ▼
-  plugin.Manager → Uploader.Upload(ctx, UploadRequest, cfg)
-        │  ③ 插件把请求转成第三方协议（HTTP / SDK / 命令行）
-        │  ④ 第三方返回 → 映射为 plugin.UploadResult
-        ▼
-  统一标准输出：URL / ObjectKey / FileName / MimeType / FileSize / Provider / URLExpireAt
-        │
-        ▼
-  ⑤ 按 文件类型 + 年月 生成对象键并归档到 {bucket}/{类型}/{年月}/ + 落库 + S3 可取回
-```
-
-**关键约束**：插件只负责「协议转换」，不负责存储、鉴权、归档、告警。这些由核心层统一处理，因此每家第三方的差异被收敛在一个文件里。
-
----
-
-## 2. 五分钟接入一家新第三方
-
-以 `internal/plugins/<yourplugin>/` 为例，一共四步。
-
-### 步骤 1：定义清单（Manifest）
-
-清单是**单一事实来源**，同时驱动：
-
-| 消费方 | 用到什么 |
+| 章节 | 你会得到 |
 | --- | --- |
-| 后台「插件详情」页 | `Params` 渲染动态表单（分组、控件类型、脱敏、临时参数提醒） |
-| 后台「插件列表」 | `Name` / `Version` / `Health` 默认检测策略 |
-| 参数校验 | `Required` / `Type` / `Options` / `Pattern` / `Volatile` |
-| MCP `plugin_registry` / `plugin_docs` | 实时返回参数 Schema 给 AI 客户端 |
-| 插件更新 | 对比清单新增参数，自动补齐默认值 |
-
-```go
-package myoss
-
-import "github.com/Mr-losfer/s3bridge/internal/plugin"
-
-const Kind = "myoss"
-
-var Manifest = plugin.Manifest{
-    Kind:         Kind,
-    Name:         "MyOSS 开放上传",
-    Version:      "1.0.0",
-    Description:  "对接 MyOSS 的 /open/upload 接口，把临时签名链接转换为统一标准输出。",
-    Author:       "Your Team",
-    Endpoint:     "POST https://api.myoss.example.com/open/upload",
-    Capabilities: []string{"upload", "image", "temp-url", "health-probe"},
-    Health: plugin.HealthHint{
-        Enabled: true, IntervalSecs: 300, TimeoutSecs: 8,
-        FailThreshold: 2, ProbeMode: "ping",
-    },
-    Params: []plugin.ParamField{
-        {Key: "base_url", Label: "服务域名", Type: "url", Group: "连接", Required: true,
-            Default: "https://api.myoss.example.com"},
-        {Key: "upload_path", Label: "上传路径", Type: "text", Group: "连接", Required: true,
-            Default: "/open/upload"},
-        {Key: "timeout_secs", Label: "请求超时（秒）", Type: "number", Group: "连接",
-            Required: true, Default: "30"},
-
-        // ↓ 临时参数：会过期、需要轮换的凭据
-        {Key: "api_token", Label: "API Token", Type: "secret", Group: "身份凭据",
-            Required: true, Sensitive: true, Volatile: true, ExpiresField: "token_expires_at",
-            Placeholder: "Bearer eyJ...", Help: "会过期的临时凭据，到期前 24 小时提醒"},
-        {Key: "token_expires_at", Label: "Token 过期时间", Type: "datetime", Group: "身份凭据",
-            Volatile: true, Placeholder: "2026-12-08 12:00:00 / 1796601498",
-            Help: "支持 RFC3339、Unix 秒/毫秒时间戳"},
-
-        {Key: "region", Label: "区域", Type: "select", Group: "高级", Default: "ap-beijing",
-            Options: []plugin.ParamOption{
-                {Label: "北京", Value: "ap-beijing"},
-                {Label: "上海", Value: "ap-shanghai"},
-            }},
-        {Key: "extra_headers", Label: "附加 Header（JSON）", Type: "textarea", Group: "高级"},
-    },
-    Docs:       "### 接入说明\n\n在这里写该插件独有的接入步骤、抓包示例与响应映射规则（Markdown）。\n",
-    SampleCode: "// 可选：展示在文档中心的示例代码\n",
-}
-```
-
-### 步骤 2：实现 Uploader
-
-```go
-type Uploader struct{}
-
-func New() plugin.Uploader { return &Uploader{} }
-
-// Upload 把统一请求转换为第三方协议，再把响应映射回统一标准输出。
-func (u *Uploader) Upload(ctx context.Context, req plugin.UploadRequest, cfg map[string]string) (*plugin.UploadResult, error) {
-    var body bytes.Buffer
-    w := multipart.NewWriter(&body)
-    part, err := w.CreateFormFile(cfg["file_field"], req.FileName)
-    if err != nil { return nil, fmt.Errorf("构造表单: %w", err) }
-    if _, err := io.Copy(part, req.Reader); err != nil { return nil, err }
-    if err := w.Close(); err != nil { return nil, err }
-
-    secs, _ := strconv.Atoi(cfg["timeout_secs"])
-    endpoint := strings.TrimRight(cfg["base_url"], "/") + cfg["upload_path"]
-    r, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
-    if err != nil { return nil, err }
-    r.Header.Set("Authorization", cfg["api_token"])
-    r.Header.Set("Content-Type", w.FormDataContentType())
-
-    resp, err := (&http.Client{Timeout: time.Duration(secs) * time.Second}).Do(r)
-    if err != nil { return nil, fmt.Errorf("%w: %v", plugin.ErrUpstream, err) }
-    defer resp.Body.Close()
-    if resp.StatusCode/100 != 2 {
-        return nil, fmt.Errorf("%w: HTTP %d", plugin.ErrUpstream, resp.StatusCode)
-    }
-
-    var out struct {
-        Code int    `json:"code"`
-        Data struct {
-            URL       string `json:"url"`
-            ObjectKey string `json:"objectKey"`
-            FileName  string `json:"fileName"`
-            MimeType  string `json:"mimeType"`
-            FileSize  int64  `json:"fileSize"`
-        } `json:"data"`
-    }
-    if err := json.NewDecoder(resp.Body).Decode(&out); err != nil { return nil, err }
-    if out.Code != 0 { return nil, fmt.Errorf("%w: code=%d", plugin.ErrUpstream, out.Code) }
-
-    return &plugin.UploadResult{
-        URL:       out.Data.URL,
-        ObjectKey: out.Data.ObjectKey,
-        FileName:  req.FileName,
-        MimeType:  req.MimeType,
-        FileSize:  req.Size,
-        Provider:  Kind,
-    }, nil
-}
-
-// Check 做轻量探活，不应产生真实业务副作用。
-// 建议：只校验凭据有效期 + 一次 HEAD/GET 连通性探测，不要上传真实文件。
-func (u *Uploader) Check(ctx context.Context, cfg map[string]string) error {
-    warning := plugin.VolatileWarning(Manifest, cfg)
-    if warning != "" { return errors.New(warning) }
-    // 还可做一次 HEAD / 连通性探测…
-    return nil
-}
-```
-
-> `cfg` 已经是**解密后的明文**，插件无需关心加密。敏感字段在落库时由核心层用 AES-256-GCM 加密。
-
-### 步骤 3：注册
-
-在 `internal/app/core.go` 的注册入口加入：
-
-```go
-reg.Register(myoss.Descriptor())
-```
-
-其中：
-
-```go
-func Descriptor() plugin.Descriptor {
-    return plugin.Descriptor{Manifest: Manifest, New: New}
-}
-```
-
-启动时 `Manager.EnsureBuiltin()` 会为每个未创建过的插件类型自动实例化，套用清单里的默认值与默认健康检测配置。
-
-### 步骤 4：测试
-
-```go
-func TestUpload(t *testing.T) {
-    upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-        // 断言 Authorization / multipart 字段名
-        _, _ = w.Write([]byte(`{"code":0,"data":{"url":"https://x/y.png","objectKey":"a/b.png"}}`))
-    }))
-    defer upstream.Close()
-
-    got, err := New().Upload(context.Background(), plugin.UploadRequest{
-        FileName: "a.png", MimeType: "image/png", Size: 3, Reader: strings.NewReader("abc"),
-    }, map[string]string{"base_url": upstream.URL, "upload_path": "/", "timeout_secs": "5"})
-    if err != nil { t.Fatal(err) }
-    if got.Provider != "myoss" || got.ObjectKey != "a/b.png" { t.Fatalf("unexpected: %+v", got) }
-}
-```
-
-运行 `go test -race ./...` 验证。
+| [1. 五分钟写出第一个插件](#1-五分钟写出第一个插件) | 一个能真实上传的插件 |
+| [2. 文件夹结构与协议](#2-文件夹结构与协议) | 插件由什么组成、主服务如何调用它 |
+| [3. SDK 参考](#3-sdk-参考) | `Input`/`Output`/`Config`/`Client`/加解密工具 |
+| [4. 参数 Schema](#4-参数-schemainpluginjson) | 后台表单怎么来的、敏感值怎么加密 |
+| [5. 用 MCP 让 Agent 全程开发](#5-用-mcp-让-agent-全程开发) | 创建 → 写码 → 编译 → 调试 → 上传验证 |
+| [6. 编译与运行时](#6-编译与运行时) | 离线编译、超时、崩溃隔离、空闲回收 |
+| [7. 调试与请求追踪](#7-调试与请求追踪) | 看到插件到底发了什么请求 |
+| [8. 图片有效性巡检](#8-图片有效性巡检) | 归档图片按周期自检，失效自动告警 |
+| [9. 常见问题](#9-常见问题) | 编译失败、Token 过期、迁移 |
 
 ---
 
-## 3. ParamField 字段参考
+## 1. 五分钟写出第一个插件
 
-| 字段 | 类型 | 说明 |
+后台「插件管理 → 创建插件」选择模板 **HTTP 表单上传**，ID 填 `my-uploader`，点创建。
+服务端会生成文件夹并立即编译，成功后会跳到详情页的「插件源码」标签：
+
+```
+my-uploader/
+├── plugin.json   # 参数 Schema 与元信息（系统维护，只读）
+├── go.mod        # 独立模块，replace 指向服务端落盘的 SDK（系统维护）
+└── main.go       # 你的代码
+```
+
+打开 `main.go`，把 `cfg["upload_url"]` 指向你的接口，保存即可生效。核心只有一个方法：
+
+```go
+func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
+	f, err := os.Open(in.Path) // 文件已落盘，直接按路径读，不必 base64 传输
+	if err != nil {
+		return nil, fmt.Errorf("打开文件: %w", err)
+	}
+	defer f.Close()
+
+	body, contentType := sdk.MultipartStream(cfg["file_field"], in.FileName, in.MimeType, f, nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg["upload_url"], body)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("Authorization", "Bearer "+cfg["token"])
+
+	resp, err := sdk.NewClient(30 * time.Second).Do(req) // 用 sdk.Client 才有请求追踪
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	// …解析响应，返回标准输出
+}
+```
+
+保存后后台会立刻编译并热切换，**不需要重启服务**。
+
+---
+
+## 2. 文件夹结构与协议
+
+### 2.1 目录约定
+
+| 文件 | 谁维护 | 说明 |
 | --- | --- | --- |
-| `Key` | string | 参数键，贯穿后台表单、MCP、持久化。建议小写下划线 |
-| `Label` | string | 表单标签（中文） |
-| `Type` | string | `text` / `secret` / `number` / `bool` / `select` / `textarea` / `url` / `datetime` / `duration` |
-| `Group` | string | 表单分组名，同组字段折叠在一起展示 |
-| `Required` | bool | 必填校验，缺失时插件无法启用/上传 |
-| `Sensitive` | bool | 前端脱敏显示，服务端 AES-256-GCM 加密存储 |
-| `Volatile` | bool | **临时参数**：会过期、需要定期轮换（如 Bearer Token） |
-| `ExpiresField` | string | 与 `Volatile` 配合，指向记录过期时间的另一个字段 key |
-| `Default` | string | 默认值，插件实例化与「全量修改/重置」时使用 |
-| `Options` | []ParamOption | `select` 类型的枚举项 `{Label, Value}` |
-| `Pattern` | string | 正则表达式额外校验 |
-| `Placeholder` / `Help` | string | 表单占位符与说明文字 |
+| `plugin.json` | 系统 | 元信息 + 参数 Schema + 健康检测建议 + 巡检周期，只读（用 `plugin_manifest_update` 改） |
+| `go.mod` / `go.sum` | 系统 | 独立模块，`replace github.com/Mr-losfer/s3bridge/sdk => {数据目录}/sdk/s3bridge-sdk` |
+| `*.go` | 你 | 任意多个文件，至少一个包含 `func main()` |
+| `*.md` / `*.txt` / `*.yaml` | 你 | 说明与配置样例，不参与编译 |
 
-`datetime` 支持 RFC3339、`2006-01-02 15:04:05`、Unix 秒/毫秒时间戳，方便直接粘贴抓包里的 `q-sign-time` 或 JWT `exp`。
+限制：单文件 ≤ 512 KB，总源码 ≤ 2 MB，最多 64 个文件；文件名不能带路径分隔符或以点开头。
+编译产物写在 `.build/plugin`，不会出现在文件列表里。
 
-### 临时参数是怎么工作的
+### 2.2 进程协议
 
-这是本系统针对「第三方有临时参数」这一痛点专门设计的机制：
+主服务以子进程方式启动编译产物，双方用**每行一条 JSON** 通信：
 
-1. 开发者在清单里把凭据标记为 `Volatile: true` 并绑定 `ExpiresField`。
-2. 后台插件列表点击打开 → 该字段显示**临时参数**标记与过期倒计时提醒。
-3. 到期前 24 小时：插件列表出现黄色 warning；到期后：校验与探活判定失败，健康检测把插件标记为 `unhealthy`。
-4. 插件行**整行标红**、置顶排序，并自动生成一条告警写入告警中心。
-5. 运维在插件详情页更新 Token → 可用 `plugin_parse_token` 一键从 JWT 解析 `exp` 与 `sub` → 立即执行调试/检测恢复。
+```
+主服务 → 插件  {"id":"c1","method":"upload","config":{...},"input":{...},"timeoutSecs":60}
+插件 → 主服务  {"id":"c1","ok":true,"result":{"url":"https://..."},"traces":[...]}
+```
 
-WorkBuddy 插件就是完整范例：`authorization`（Bearer Token）+ `token_expires_at` + `x_user_id` + `cookie` 一组临时参数，全部通过表单配置，无需改代码。
+- `method` 只有三种：`ping`（握手）、`upload`、`check`。
+- 同一插件的调用**串行**执行，插件里不需要自己加锁。
+- 写 stdout 的只能是协议消息；**日志一律写 stderr**（会被收集用于崩溃诊断）。
+- `sdk.Serve(plugin{})` 已经实现了这个循环，正常开发不用关心。
+
+### 2.3 为什么不是 Go 的 `plugin` 包
+
+`plugin` 包要求插件与主程序用完全相同的 Go 版本、相同的依赖版本编译，且只支持 Linux/macOS。
+独立进程方案换来的是：跨平台、插件崩溃不会拖垮主服务、插件可用任意第三方库、单个插件超时可被强杀。
 
 ---
 
-## 4. 统一标准输出（UploadResult）
+## 3. SDK 参考
 
-无论接哪家第三方，调用方拿到的永远是这个结构：
+导入路径：`github.com/Mr-losfer/s3bridge/sdk`
+
+### 3.1 必须实现的接口
+
+```go
+type Uploader interface {
+	// Upload 把文件转发到第三方并返回统一结果。
+	Upload(ctx context.Context, in Input, cfg Config) (*Output, error)
+	// Check 做无副作用探活，不得上传真实业务文件。
+	Check(ctx context.Context, cfg Config) error
+}
+```
+
+`main()` 里只需 `sdk.Serve(plugin{})`。
+
+### 3.2 输入与输出
+
+```go
+type Input struct {
+	FileName  string // 原始文件名
+	MimeType  string // 客户端声明的 MIME
+	Size      int64  // 字节数
+	Path      string // 落盘绝对路径，直接 os.Open
+	Bucket    string // 目标存储桶
+	ObjectKey string // 归档对象键
+	UserID    string // 上传者
+}
+
+type Output struct {
+	URL         string         // 必填：第三方返回的可访问地址
+	ObjectKey   string         // 远端对象键，留空则沿用本地
+	FileName    string         // 留空则沿用原始文件名
+	MimeType    string
+	FileSize    int64
+	URLExpireAt *time.Time     // 临时签名链接的到期时间，用于后台提醒
+	Extra       map[string]any // 任意附加字段，会原样存进对象元数据
+}
+```
+
+`URL` 是唯一的硬性要求：没有它，后台列表点不开原图。
+
+### 3.3 带追踪的 HTTP 客户端
+
+```go
+c := sdk.NewClient(30 * time.Second)                             // 带超时
+res, err := c.Bytes(ctx, http.MethodPut, url, headers, body)     // 原始字节
+res, err := c.JSON(ctx, http.MethodPost, url, headers, in, &out) // JSON 进 JSON 出
+resp, err := c.Do(req)                                           // 完全自控（流式、重定向策略）
+```
+
+用 `sdk.NewClient` 而不是 `http.DefaultClient` 的区别是：**每次出站请求都会被记录**，
+后台调试台与 `plugin_debug` 能看到方法、URL、状态码、耗时、字节数与响应片段，
+其中 `Authorization`、`Cookie`、`X-Api-Key` 等请求头和 `token`、`signature` 等 query 参数会被自动脱敏为 `***`。
+
+单次调用最多保留 64 条追踪，防止死循环插件撑爆响应。
+
+### 3.4 上传辅助
+
+```go
+body, contentType := sdk.MultipartStream("file", in.FileName, in.MimeType, f, map[string]string{
+	"biz": "avatar",
+})
+```
+
+流式构造 multipart，文件内容不会被整体读进内存，适合大文件。
+
+### 3.5 加解密与编码
+
+| 函数 | 用途 |
+| --- | --- |
+| `DeriveKey(secret) []byte` | 把任意口令派生为 32 字节 AES-256 密钥 |
+| `AESGCMSeal(key, plain, aad)` / `AESGCMOpen(key, token, aad)` | AES-256-GCM 加解密（base64 含 nonce） |
+| `HMACSHA256Hex(secret, msg)` | 接口签名 |
+| `SHA256Hex(data)` / `MD5Hex(data)` | 摘要（兼容只认 MD5 的上游） |
+| `RandHex(n)` | 随机串（nonce、追踪号） |
+| `Base64` / `UnBase64` | 标准 base64 |
+| `JWTPayload(token)` | 解析 JWT payload 读取 `exp` / `sub`，不校验签名 |
+
+---
+
+## 4. 参数 Schema（plugin.json）
+
+后台参数表单不是手写的，而是由 `plugin.json` 的 `params` 渲染：
 
 ```json
 {
-  "id": "obj_xxx",
-  "bucket": "default",
-  "objectKey": "image/202611/a1b2.png",
-  "fileName": "banner.png",
-  "mimeType": "image/png",
-  "category": "image",
-  "size": 2033070,
-  "sha256": "…",
-  "provider": "workbuddy",
-  "pluginId": "workbuddy",
-  "remoteUrl": "https://…/83420.png?q-sign-algorithm=sha1&…",
-  "remoteKey": "attachments/…/83420.png",
-  "urlExpireAt": "2026-12-08T12:00:00Z",
-  "createdAt": "2026-11-08T23:58:31Z"
+  "schema": 2,
+  "id": "my-uploader",
+  "name": "我的上传器",
+  "version": "1.0.0",
+  "entry": "main.go",
+  "timeoutSecs": 60,
+  "priority": 100,
+  "fileTypes": ["image"],
+  "health": { "enabled": true, "intervalSecs": 300, "timeoutSecs": 8, "failThreshold": 2, "probeMode": "ping" },
+  "validity": { "intervalHours": 72 },
+  "params": [
+    { "key": "upload_url", "label": "上传地址", "type": "url", "group": "连接", "required": true },
+    { "key": "file_field", "label": "文件字段名", "type": "text", "group": "连接", "default": "file" },
+    { "key": "token", "label": "Bearer Token", "type": "secret", "group": "身份凭据",
+      "sensitive": true, "volatile": true, "expiresField": "token_expires_at" },
+    { "key": "token_expires_at", "label": "Token 过期时间", "type": "datetime", "group": "身份凭据", "volatile": true }
+  ]
 }
 ```
 
-`URLExpireAt` 可选：若第三方返回临时签名链接，插件应从 URL 参数（如 COS 的 `q-sign-time`）解析出到期时间填入，系统据此提醒续期。**注意**：S3Bridge 同时把文件本体归档到本地存储桶，因此即使第三方临时链接过期，通过 S3 接口取回的对象依然长期有效。
+字段类型：`text` `secret` `number` `bool` `select` `textarea` `url` `datetime` `duration`。
 
-文件类型（`category`）由核心层按 MIME 自动判定。自动生成的**桶内对象键**为 `{category}/{YYYYMM}/{hash}_{name}`（bucket 由 S3 路径承载，不重复写进 key），**磁盘归档路径**为 `{objectDir}/{bucket}/{category}/{YYYYMM}/{hash}-{name}`。上传列表可按 bucket 与类型双维度过滤，S3 侧可用 `prefix=image/` 直接按类型列举。
+几个影响行为的标记：
 
----
-
-## 5. 配置、修改与运维能力
-
-所有能力在后台页面和 MCP 工具中**双通道可用**，底层是同一份实现：
-
-| 操作 | 后台 | MCP 工具 | 语义 |
-| --- | --- | --- | --- |
-| 差量修改 | 插件详情「保存」 | `plugin_patch` | 只更新传入字段，`params` **按键合并**，未传字段保持不变；支持 `expectedRevision` 乐观锁防并发覆盖 |
-| 全量修改 | 插件详情「重置为完整配置」 | `plugin_replace` | 用完整配置替换，未提供的参数**重置为清单默认值** |
-| 参数修改 | 插件详情参数表单 | `plugin_params_set` | 仅按 key 覆盖指定参数，用于轮换临时 Token |
-| 调度权重 | 列表权重输入框 / 详情「调度设置」 | `plugin_patch` | `priority` 越大越优先；列表按权重降序即实际调度顺序 |
-| 文件类型 | 详情「调度设置」多选 | `plugin_patch` | `fileTypes` 限定承接范围（image/video/audio/document/archive/other），空表示全部 |
-| 插件更新 | 「更新插件」 | `plugin_update` | 升级版本号，`syncParams` 补齐清单新增参数，`resetToDefault` 重置全部默认值 |
-| 启用/停用 | 列表开关 | `plugin_toggle` | 停用后不参与自动选择，调度器同步移除检测任务 |
-| 调试 | 「调试」 | `plugin_debug` | 无副作用地执行：参数校验 → 临时凭据有效期检查 → 上游连通性探测，返回分步诊断 |
-| 立即检测 | 「检测」 | `plugin_health_check` | 跑一次真实探活并更新状态/告警 |
-| 定时检测 | 列表「设置」抽屉 | `plugin_health_config` | 每插件独立配置间隔、超时、失败阈值、探活模式，保存后调度器重建该任务 |
-| 变更审计 | 插件详情「变更记录」 | `plugin_changes` | 差量/全量/更新/调试/参数修改全部留痕（actor、diff、时间） |
-| 查看文档 | 文档中心 | `plugin_docs` | 返回本文档 + 实时参数模板 |
-| 类型清单 | — | `plugin_registry` | 返回所有已编译插件类型的完整清单，供开发新插件参考 |
-
-### 调度权重与文件类型
-
-上传时的插件选择分两步：
-
-1. **按文件类型过滤**：核心层用 MIME（缺失时嗅探文件头）与扩展名判定 `category`，只保留 `FileTypes` 包含该类型（或未配置、表示全部）的已启用插件。
-2. **按权重排序**：在候选插件中取 `Priority` 最大者；权重相同时按健康状态排序（healthy → unknown → degraded）。已判定 `unhealthy` 的插件会被跳过，除非没有其他候选。
-
-```json
-{ "priority": 320, "fileTypes": ["image", "document"] }
-```
-
-后台插件列表的权重输入框、详情页「调度设置」与 MCP `plugin_patch` 改的是同一份数据，写入都会记入变更审计。声明式插件源码里也可写 `fileTypes`，保存源码时同步到实例。
-
-### 版本与更新
-
-发布新插件时提升 `Manifest.Version`，并在 `Params` 中追加新字段（给 `Default`）。运维执行「插件更新」后：
-
-- 新参数按默认值补齐到已有实例，旧参数值不丢失；
-- 版本号与更新说明写入变更记录；
-- 需要彻底回到初始状态时才勾选 `resetToDefault`。
-
----
-
-## 6. 健康检测与告警
-
-- 调度器为每个启用且开启检测的插件启动独立 goroutine，`context` 可取消、`WaitGroup` 可等待，进程退出时干净关闭。
-- 连续失败达到 `FailThreshold` → 状态置 `unhealthy` → 生成 `Alert`；恢复成功时未确认告警自动标记「系统已恢复」。
-- 后台表现：插件列表**异常行整行标红并置顶**、概览页红色告警条、侧边栏「告警中心」角标。
-- 全局总开关在「系统设置」；插件级配置优先。
-
----
-
-## 7. 安全约定（务必遵守）
-
-1. **不要把密钥写进代码、清单默认值或配置文件**。凭据一律通过后台表单 / MCP 传入，由核心层加密落库。
-2. `Upload` 必须使用传入的 `ctx`，让超时与取消能穿透到第三方调用。
-3. 所有第三方响应都要校验状态码与业务码，并用 `fmt.Errorf("%w: ...", plugin.ErrUpstream)` 包装错误，便于上层归类告警。
-4. `Check` 不得产生真实业务副作用（不要上传真实文件、不要扣费）。
-5. `UploadRequest.ObjectKey` 已由核心层做路径穿越清洗，插件不要自行拼接本地文件系统路径。
-6. 插件 `Uploader` 应尽量无状态，可被并发复用；需要状态时自行加锁。
-
----
-
-## 8. 内置参考实现：WorkBuddy
-
-`internal/plugins/workbuddy/` 是完整的生产级范例，对接：
-
-```
-POST https://copilot.tencent.com/v2/backgroundagent/localProxy/upload
-Content-Type: multipart/form-data
-Authorization: Bearer <JWT>
-x-user-id / x-client-version / x-client-product / x-client-platform / user-agent / cookie
-```
-
-响应转换规则：
-
-| 上游字段 | 标准输出 |
+| 标记 | 效果 |
 | --- | --- |
-| `data.url` | `URL` |
-| `data.objectKey` | `ObjectKey` |
-| `data.fileInfo.fileName` | `FileName` |
-| `data.fileInfo.mimeType` | `MimeType` |
-| `data.fileInfo.fileSize` | `FileSize` |
-| URL 中的 `q-sign-time` 结束时间 | `URLExpireAt` |
+| `required` | 缺失时插件状态为异常，调试第一步就失败 |
+| `sensitive` | 后台脱敏展示，落盘前用主密钥 AES-256-GCM 加密，传给插件时已解密 |
+| `volatile` + `expiresField` | 视为临时凭据：到期前 24 小时提醒，过期后直接判为异常 |
+| `group` | 表单分组标题，省略归入「通用」 |
 
-它还实现了 JWT `exp` / `sub` 解析（对应 MCP 工具 `plugin_parse_token`），可从粘贴的 Bearer Token 自动填好过期时间与 `x_user_id`。
+`validity.intervalHours` 为该插件产出的图片单独指定巡检周期（0 表示跟随系统设置）。
 
----
+### 通过 MCP 修改清单
 
-## 9. 检查清单
-
-- [ ] `Manifest.Kind` 全局唯一，`Version` 语义化
-- [ ] 所有必填参数都有 `Required: true` 和合理 `Default`
-- [ ] 会过期的凭据已标记 `Volatile` + `ExpiresField`
-- [ ] 密钥类字段已标记 `Sensitive`
-- [ ] `Upload` 使用 `ctx`，错误用 `%w` 包装
-- [ ] `Check` 无业务副作用
-- [ ] 有 `httptest` 单元测试，覆盖成功/失败/超时路径
-- [ ] `go test -race ./...` 通过
-- [ ] 文档（`Docs` 字段）说明了抓包示例与响应映射
+```jsonc
+// plugin_manifest_update
+{ "id": "my-uploader", "manifest": { /* 完整 plugin.json 内容，id 会被强制为当前插件 */ } }
+```
 
 ---
 
-## 10. 通过 MCP 完全掌控插件开发（声明式插件源码）
+## 5. 用 MCP 让 Agent 全程开发
 
-前 9 章的 Go 插件需要编译进二进制，Agent 无法在运行时从零创建。为此 S3Bridge 提供**声明式插件源码（Plugin Source）**：一份 JSON 描述参数 Schema、第三方 HTTP 请求模板与响应字段映射，服务端即时编译成 `Uploader`，**改动后无需重启、无需 Go 工具链**。后台的创建/查看/差量修改与 MCP 工具完全同源。
+连接 MCP 后（参见 [MCP 能力与工具清单](mcp.md)），Agent 可以不碰后台界面完成全部工作：
 
-### 10.1 源码结构
-
-| 层级 | 字段 | 说明 |
+| 步骤 | 工具 | 说明 |
 | --- | --- | --- |
-| 根 | `kind` / `name` / `version` / `description` / `author` / `docs` | 与 Go 插件的 `Manifest` 等价，`kind` 必须等于插件 ID |
-| 根 | `params` | `ParamField` 数组，驱动后台动态表单、校验与 MCP 参数修改（字段见第 3 章） |
-| `request` | `method` / `url` | 请求方法与地址模板，渲染后必须是 `http(s)://` |
-| `request` | `headers` / `fields` / `fileField` / `rawBody` | 请求头、额外表单字段、文件字段名；值支持 `{{变量}}` |
-| `request` | `mode` | `multipart`（默认）/ `json`（文件转 base64）/ `form` / `raw` |
-| `request` | `checkUrl` / `timeoutSecs` | 可选探活地址（GET）；超时 1～120 秒 |
-| `response` | `codePath` / `successCode` / `messagePath` | 业务码与错误消息路径，如 `code` / `"0"` / `msg` |
-| `response` | `urlPath`（必填）/ `objectKeyPath` | 下载地址与对象键路径 |
-| `response` | `fileNamePath` / `sizePath` / `mimeTypePath` / `expirePath` | 文件信息；缺省时沿用上传请求中的值 |
-| `health` | `enabled` / `intervalSecs` / `timeoutSecs` / `failThreshold` / `probeMode` | 定时检测策略，保存时同步到插件实例 |
+| 1 看示例 | `plugin_files` + `plugin_file_read` | 读内置 `workbuddy` 的 `main.go`，就是一份真实可跑的参考实现 |
+| 2 建插件 | `plugin_create` | `{id,name,template,files,params,priority,fileTypes}`，创建即编译 |
+| 3 写代码 | `plugin_file_write` | 写单个文件并**自动重新编译**；失败会保留源码并返回编译器输出 |
+| 4 试编译 | `plugin_validate` | 在临时目录编译一份源码，不落库、不影响运行中的插件 |
+| 5 加文件 | `plugin_file_write` + `plugin_file_rename` / `plugin_file_delete` | 多文件拆分、改名（入口文件改名会同步 `entry`）、删除 |
+| 6 改清单 | `plugin_manifest_update` | 加参数、改超时、改文件类型、改巡检周期 |
+| 7 配参数 | `plugin_params_set` | 敏感值加密落盘 |
+| 8 编译 | `plugin_build` | 手动触发，返回输出、耗时、产物 SHA-256 |
+| 9 调试 | `plugin_debug` | 参数 → 凭据有效期 → 产物 → 自检，并带回请求追踪 |
+| 10 真传 | `upload_test` | 用 base64 内容走一次真实上传 |
+| 11 备份/迁移 | `plugin_export` | 导出全部源码与清单 |
 
-模板变量 `{{key}}` 必须先在 `params` 中声明，否则静态校验直接拒绝（避免运行时静默失败）。内置变量无需声明：`file_name`、`mime_type`、`bucket`、`object_key`、`file_size`、`timestamp`、`unix`。
+典型的一轮修复循环：
 
-响应路径支持点号与数组下标，例如 `data.fileInfo.fileName`、`data.items[0].url`；JSON 数字用原始精度解析，不会退化成科学计数法。`expirePath` 支持 RFC3339 与 Unix 秒/毫秒。
+```
+plugin_file_write(id="my-uploader", name="main.go", content="…")
+→ build.ok=false, output="main.go:23:2: undefined: sdk.HmacSHA256"
+→ 按输出改一处
+→ plugin_file_write(...) → build.ok=true
+→ plugin_debug → 看到 PUT 请求 200
+→ upload_test → 归档里出现该文件
+```
 
-### 10.2 MCP 全流程（Agent 只需这些工具）
+Agent 不需要你告诉它 SDK 有哪些函数：`plugin_file_read(id="workbuddy")` 就是最好的示例，
+`plugin_docs` 工具会返回本文档。
 
-| 步骤 | 工具 | 作用 |
-| --- | --- | --- |
-| 1 参考 | `plugin_code_get`（`id=workbuddy`） | 读取内置插件的等价声明式源码作为模板 |
-| 2 创建 | `plugin_create` | 从零建实例；可附 `definition`，或用 `template` 从内置插件派生；不带定义则生成可运行骨架 |
-| 3 读码 | `plugin_code_get` | 返回 `source`（对象）、`sourceJSON`（规范化文本）、`manifest`、`revision`、`editable` |
-| 4 改码 | `plugin_code_upload` / `plugin_code_patch` | 全量替换 / 字段级差量；均支持 `expectedRevision` 乐观锁 |
-| 5 自检 | `plugin_validate` | 不落库：结构、模板变量、必填参数、脱敏后的请求预览 |
-| 6 配置 | `plugin_params_set` | 填 `base_url` / Token 等，敏感值自动加密 |
-| 7 验证 | `plugin_debug` → `upload_test` | 无副作用调试 → 走新插件真实上传并返回统一标准输出 |
-| 8 交付 | `plugin_export` | `format=json` 可移植定义；`format=go` 生成可内置化的 `plugin.go` |
-| 9 下线 | `plugin_delete` | 删除自定义插件（内置插件只能 `plugin_toggle` 停用） |
+---
 
-`plugin_code_patch` 支持点号路径，例如 `{"request.headers.X-Stage":"v2"}`；值为 `null` 表示删除该字段；`params` 数组按 `key` 做 upsert，元素带 `_delete:true` 表示删除该参数。所有源码写操作都写入 `ChangeLog`（动作 `create` / `code` / `code_patch` / `delete`），可用 `plugin_changes` 回溯。
+## 6. 编译与运行时
 
-### 10.3 后台入口
+### 6.1 构建环境
 
-「插件列表」页的 **＋ 创建插件** 可填 ID、名称、版本、说明并选择起始模板；创建后跳到详情页的 **插件源码** 标签，可直接编辑 JSON、静态校验、全量保存、差量修改、导出 JSON / Go 源码，以及删除自定义插件。这与 MCP 调用的是同一组工具，结果一致。
+- 需要 **Go 1.21+** 工具链在主服务所在主机上可用（`PATH` 里能找到 `go`）。
+  未安装时服务仍可启动，但只能运行已编译好的 `.build/plugin`，后台会显示「未检测到 Go 工具链」。
+- SDK 源码内嵌在二进制里，启动时落盘到 `{数据目录}/sdk/s3bridge-sdk`；
+  插件 `go.mod` 通过 `replace` 指向它，因此**离线也能编译**（不访问网络）。
+- 编译环境会清理外部干扰：固定 `CGO_ENABLED=0`、`GO111MODULE=on`、`GOTOOLCHAIN=local`、
+  `GOFLAGS=-mod=mod`、`GOWORK=off`，`GOCACHE`/`GOMODCACHE`/`GOPATH` 全部落在 `{数据目录}/cache`。
+- 引入第三方库时编译器会提示缺少 `go.sum`，服务端自动执行一次 `go mod tidy` 后重试（需要网络）。
 
-### 10.4 何时用哪种方式
+### 6.2 运行时
 
-| | 声明式源码 + MCP | Go 插件（第 2 章） |
-| --- | --- | --- |
-| 接入一家标准 HTTP 上传接口 | ✅ 推荐，分钟级 | 可行但需发版 |
-| 需要 SDK、复杂签名、流式转换、自定义协议 | ❌ | ✅ |
-| Agent 运行时自主开发 / 调试 | ✅ | ❌ |
-| 需要随二进制发布、极致性能 | 用 `plugin_export format=go` 内置化 | ✅ |
+| 行为 | 说明 |
+| --- | --- |
+| 启动 | 首次调用时懒编译；之后直接复用 `.build/plugin` |
+| 握手 | 启动后先发 `ping`，确认产物可用，避免把坏二进制当成业务错误 |
+| 并发 | 同一插件的调用串行，不同插件并行 |
+| 超时 | `plugin.json` 的 `timeoutSecs`（默认 60，最大 600）；超时直接 kill 进程，下次调用自动重启 |
+| 崩溃 | 进程退出后记录 stderr 末尾，状态置为异常并告警；下次调用重新拉起 |
+| 回收 | 10 分钟无调用回收子进程，释放内存 |
+| 热切换 | 编译成功后立即丢弃旧进程，下一次调用加载新代码 |
 
-两种方式共用同一套 `Uploader` 契约与参数 Schema，导出的 Go 文件放进 `internal/plugins/<kind>/plugin.go` 并在 `internal/app/core.go` 注册 `Descriptor()` 即可内置化，行为与动态版本完全一致。
+### 6.3 健康检测
 
-### 10.5 安全边界
+`Check` 会被按插件独立配置的周期调用（默认 300 秒，可关闭）。失败不会立刻判死：
+连续失败达到 `failThreshold` 才标记异常并生成告警，恢复后自动关闭未确认告警。
+若插件声明了 `volatile` 凭据且过期时间未设置或已过期，即使 `Check` 成功也会被判为异常——
+这是故意的：Token 过期是这类插件最常见的故障。
 
-- 源码保存前校验：`kind` 格式、参数 key 唯一性与类型、模板变量必须声明、请求方法/模式、超时范围、请求头名称与 CRLF 注入、响应 `urlPath` 必填。
-- 运行时渲染后再次校验目标 URL 只允许 `http/https` 且主机名非空；请求头禁止换行；源码上限 1 MiB、上游响应上限 4 MiB。
-- `Check` 只做 TCP 连通性或可选 `checkUrl` 的 GET 探测，不上传真实文件，符合无副作用探活约定。
-- 源码写操作要求 `plugin:write`，读操作要求 `plugin:read`；内置插件源码只读，避免误改核心实现。
+---
+
+## 7. 调试与请求追踪
+
+后台「调试与检测」标签或 MCP `plugin_debug` 会依次执行：
+
+| 步骤 | 内容 |
+| --- | --- |
+| 参数校验 | 必填、类型、URL、枚举、正则、时间格式 |
+| 临时凭据有效期 | 读取 `expiresField`，提示剩余时间或已过期 |
+| 编译产物 | 产物是否存在，缺失时补编译 |
+| 插件自检 | 真实调用 `Check`，返回耗时与产生的请求数 |
+
+同时返回**请求追踪**：每次出站请求的方法、URL、状态码、耗时、请求/响应字节数、
+脱敏后的请求头与响应片段（前 512 字节）。排查「上游到底返回了什么」不用再抓包。
+
+调试是只读的：`Check` 不允许上传真实文件，调试也不会写归档。
+
+---
+
+## 8. 图片有效性巡检
+
+上传归档到本站的图片，可能因为上游删除、签名过期、对象损坏而失效。系统内置巡检：
+
+- **范围**：只检查本站归档（`localPath` 非空）的图片对象，远程直链不检查。
+- **周期**：默认 **72 小时（3 天）** 一次，可在「系统设置 → 图片有效性巡检」改全局间隔，
+  也可在插件 `plugin.json` 的 `validity.intervalHours` 单独覆盖。
+- **方式**：向本机回环地址发 `HEAD`（上游不支持 HEAD 时退回 `Range: bytes=0-0` 的 GET），
+  **只读响应头，绝不下载正文**。判定 `200/206` 且 `Content-Type` 为 `image/*` 即为正常。
+- **失败处理**：连续失败达到阈值（默认 2 次）才标记 `invalid` 并生成告警；
+  单次网络抖动只会累加计数。恢复后自动清零。
+- **可见性**：相册与上传列表会标记失效图片，并支持按有效性筛选。
+
+探测接口 `/api/internal/object-probe` 只接受回环地址，并要求 HMAC-SHA256 签名
+（密钥由主密钥派生，不落盘），因此不会被外部当作免费图片代理。
+
+---
+
+## 9. 常见问题
+
+**编译失败：`expected 'package', found 'EOF'`**
+新建了空 `.go` 文件。后台新建 `.go` 会写入骨架，脚本直接调用 API 时需要自己写 `package main`。
+
+**编译失败：`missing go.sum entry`**
+插件引入了第三方库。服务端会自动 `go mod tidy` 重试一次；离线环境请改用标准库。
+
+**`未找到 go 命令`**
+主机没装 Go 工具链。装上 Go 1.21+ 后重启服务，或在别处编译好 `.build/plugin` 拷过来。
+
+**插件一直「异常」，但调试显示自检通过**
+`volatile` 凭据过期时间没填或已过期。到参数页补 `token_expires_at`。
+
+**v1.x 的声明式插件去哪了**
+升级后自动迁移：内置插件变成同名文件夹（源码就是内置 Go 实现），
+自定义声明式插件生成一份带说明的 `main.go` 骨架，原定义留档在 `legacy-definition.json`。
+声明式模板引擎已移除，需要按本文档用 Go 重写 —— 好消息是能表达的东西不再受限。
+
+**内置插件能改吗**
+能。源码在 `{数据目录}/plugins/workbuddy/`，改完保存即生效；升级不会覆盖你改过的文件
+（只在文件缺失时写入）。想保留一份原始实现可先 `plugin_export`。

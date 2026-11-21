@@ -1,0 +1,139 @@
+{
+  "schema": 2,
+  "id": "workbuddy",
+  "name": "WorkBuddy 开放上传",
+  "version": "2.0.0",
+  "description": "对接 WorkBuddy App 的 localProxy/upload 接口，把第三方临时签名 COS 链接转换为统一标准输出。需要按有效期轮换 Bearer Token。",
+  "author": "S3Bridge Core",
+  "entry": "main.go",
+  "fileTypes": [],
+  "priority": 100,
+  "timeoutSecs": 60,
+  "health": {
+    "enabled": true,
+    "intervalSecs": 300,
+    "timeoutSecs": 8,
+    "failThreshold": 2,
+    "probeMode": "ping"
+  },
+  "validity": {
+    "enabled": true,
+    "intervalHours": 72
+  },
+  "params": [
+    {
+      "key": "base_url",
+      "label": "服务域名",
+      "type": "url",
+      "group": "连接",
+      "required": true,
+      "default": "https://copilot.tencent.com",
+      "help": "WorkBuddy 开放接口的服务根地址，不含路径。"
+    },
+    {
+      "key": "upload_path",
+      "label": "上传路径",
+      "type": "text",
+      "group": "连接",
+      "required": true,
+      "default": "/v2/backgroundagent/localProxy/upload"
+    },
+    {
+      "key": "file_field",
+      "label": "文件字段名",
+      "type": "text",
+      "group": "连接",
+      "required": true,
+      "default": "file",
+      "help": "multipart 表单中文件字段的名称。"
+    },
+    {
+      "key": "timeout_secs",
+      "label": "请求超时（秒）",
+      "type": "number",
+      "group": "连接",
+      "required": true,
+      "default": "30"
+    },
+    {
+      "key": "max_file_bytes",
+      "label": "单文件上限（字节）",
+      "type": "number",
+      "group": "连接",
+      "default": "52428800"
+    },
+    {
+      "key": "authorization",
+      "label": "Bearer Token / Authorization",
+      "type": "secret",
+      "group": "身份凭据",
+      "required": true,
+      "sensitive": true,
+      "volatile": true,
+      "expiresField": "token_expires_at",
+      "placeholder": "Bearer eyJhbGciOiJSUzI1NiIs...",
+      "help": "填完整 Authorization 头值；只粘贴 token 时系统会自动补 Bearer 前缀。这是会过期的临时参数。"
+    },
+    {
+      "key": "token_expires_at",
+      "label": "Token 过期时间",
+      "type": "datetime",
+      "group": "身份凭据",
+      "volatile": true,
+      "placeholder": "2026-12-08 12:00:00 / 1796601498",
+      "help": "支持 RFC3339、Unix 秒/毫秒。可从 Bearer Token 自动解析，过期前 24 小时开始提醒。"
+    },
+    {
+      "key": "x_user_id",
+      "label": "X-User-Id",
+      "type": "text",
+      "group": "身份凭据",
+      "required": true,
+      "help": "WorkBuddy 用户 UUID，需与 Bearer Token 中的 sub 一致。"
+    },
+    {
+      "key": "cookie",
+      "label": "Cookie（可选）",
+      "type": "secret",
+      "group": "身份凭据",
+      "sensitive": true,
+      "placeholder": "tgw_l7_route=...",
+      "help": "网关路由 Cookie，某些网络环境需要。"
+    },
+    {
+      "key": "x_client_version",
+      "label": "客户端版本",
+      "type": "text",
+      "group": "客户端标识",
+      "default": "2.8.0"
+    },
+    {
+      "key": "x_client_product",
+      "label": "客户端产品",
+      "type": "text",
+      "group": "客户端标识",
+      "default": "workbuddy-app"
+    },
+    {
+      "key": "x_client_platform",
+      "label": "客户端平台",
+      "type": "select",
+      "group": "客户端标识",
+      "default": "android",
+      "options": [
+        { "label": "Android", "value": "android" },
+        { "label": "iOS", "value": "ios" },
+        { "label": "Web", "value": "web" },
+        { "label": "Desktop", "value": "desktop" }
+      ]
+    },
+    {
+      "key": "user_agent",
+      "label": "User-Agent",
+      "type": "text",
+      "group": "客户端标识",
+      "default": "WorkBuddyApp/2.8.0"
+    }
+  ],
+  "docs": "### 接入说明\n\nWorkBuddy 的上传接口需要一组**临时参数**：Bearer Token 有有效期（JWT `exp`），`x-user-id` 必须与 Token 中的 `sub` 一致，部分网络环境还需要 `cookie` 中的网关路由值。\n\n本插件是真正的 Go 程序，源码在 `{DataDir}/plugins/workbuddy/`，可在后台直接修改：换域名、加签名、改成 PUT 直传都只需改 `main.go`。\n\n**响应转换**：上游 `data.url` → 标准 `url`，`data.objectKey` → 标准 `objectKey`，`data.fileInfo` → 标准 `fileName` / `mimeType` / `fileSize`；签名 URL 中的 `q-sign-time` 结束时间会被解析为 `urlExpireAt`。\n\n> 上游返回的是**临时签名链接**，S3Bridge 会同时把文件本体归档到本地存储桶，因此即使第三方链接过期，通过 S3 标准接口取回的对象依然有效。"
+}

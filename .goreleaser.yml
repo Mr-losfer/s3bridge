@@ -86,12 +86,16 @@ release:
   name_template: "S3Bridge {{ .Version }}"
   header: |
     ### 版本亮点
-    * **新增监控中心**：全站请求指标（1 小时 → 30 天三档时间线）、错误率、P50/P95/P99、慢接口与易错接口排行、运行时健康（goroutine / 内存 / 磁盘），以及结构化**异常日志**（7 类分类、按路由模板聚合、支持级别与关键字检索）
-    * **新增存储体检**：桶健康分、类型分布、Top 大文件、重复内容、断链、孤儿文件、超期与即将过期、磁盘占用；快照毫秒级返回，深度体检异步执行并可轮询进度
-    * **新增全站图片相册**：跨桶图墙，网格 / 瀑布流一键切换、时间与桶筛选、无限滚动、灯箱；游标分页让深翻页恒定耗时，缩略图按需生成并磁盘缓存
-    * **性能优先**：埋点 **148 ns/op、0 次内存分配**，16 并发压测下监控接口 P95 < 40 ms，采集不拖慢业务
-    * feat: MCP 新增 4 个只读工具（`monitor_summary` / `monitor_storage` / `monitor_errors` / `gallery_list`），工具总数增至 49
-    * docs: 新增《监控中心与存储体检》《全站图片相册》两份文档，随二进制 embed，后台 / MCP / 仓库三处同源
+    * **插件模型全新重构：插件就是 Go 程序**。每个插件是一个文件夹（`plugin.json` + 任意多个 `.go`），服务端运行时 `go build` 编译为独立可执行文件、以子进程调用。可发起任意次请求、使用任意方法（PUT / DELETE / multipart）、自由做加解密与签名——不再受「单请求模板」限制
+    * **运行时编译 + 子进程隔离**：SDK 源码内嵌并落盘，插件 `go.mod` 通过 `replace` 指向本地，**离线可编译**；编译串行化、`CGO_ENABLED=0`、超时强杀、崩溃隔离、10 分钟空闲回收、编译成功即热切换
+    * **新增图片有效期巡检**：本站归档图片默认 **72 小时（3 天）** 自检一次，只发 `HEAD`（不支持时退回 `Range: bytes=0-0`）判断「是否返回图片」，**绝不下载正文**；连续失败达阈值才标记失效并告警，相册与列表可直接筛选「已失效」
+    * **后台新增多文件源码编辑器**：文件树（入口标记 / 系统文件只读）、保存即编译、编译器输出面板、产物 SHA-256、新建/改名/删除文件、一键导出全部源码
+    * **MCP 插件开发工具重写**：`plugin_create` / `plugin_files` / `plugin_file_read` / `plugin_file_write` / `plugin_file_delete` / `plugin_file_rename` / `plugin_build` / `plugin_validate` / `plugin_manifest_update` / `plugin_export`，Agent 可全程完成「建插件 → 写代码 → 看编译错误 → 修复 → 调试看请求追踪 → 真实上传」闭环
+    * **请求追踪**：插件每次出站请求的方法、URL、状态码、耗时、字节数与响应片段都会进入调试报告，`Authorization` / `Cookie` / `token` 等敏感字段自动脱敏
+    * **平滑迁移**：v1.x 的内置 WorkBuddy 自动转为同名 Go 插件文件夹（源码可读可改），自定义声明式插件生成带说明的骨架并保留 `legacy-definition.json`
+    * feat: MCP 工具数增至 53，新增 `plugin_files` / `plugin_file_read` / `plugin_file_write` / `plugin_file_delete` / `plugin_file_rename` / `plugin_build` / `plugin_manifest_update`
+    * docs: 重写《插件开发文档》，新增《图片有效性》说明，MCP 工具清单与工作流同步更新
+    * perf: 插件编译复用统一 `GOCACHE`，二次编译百毫秒级；上传路径不额外拷贝文件（插件直接读临时文件）
   footer: |
     ---
     **安装**：见 [安装与部署文档](https://github.com/Mr-losfer/s3bridge/blob/main/docs/installation.md)

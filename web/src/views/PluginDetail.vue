@@ -1,8 +1,8 @@
 <script setup>
 import { ref, computed, onMounted } from 'vue'
 import {
-  Play, Radar, Save, Eye, EyeOff, RotateCw, Check, Trash2, Download,
-  SlidersHorizontal, Code2, History, BookOpen, CircleAlert, Timer, FileJson,
+  Play, Radar, Save, Eye, EyeOff, RotateCw, Check, Trash2,
+  SlidersHorizontal, Code2, History, BookOpen, Timer, FileJson, ImageOff,
 } from 'lucide-vue-next'
 import { api } from '../api'
 import { route, go } from '../router'
@@ -11,6 +11,7 @@ import { relTime, fmtTime, renderMarkdown, truncate, categoryLabels, categoryLab
 import PageHeader from '../components/PageHeader.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import CodeBlock from '../components/CodeBlock.vue'
+import PluginSource from '../components/PluginSource.vue'
 import Badge from '../components/ui/Badge.vue'
 import Button from '../components/ui/Button.vue'
 import Card from '../components/ui/Card.vue'
@@ -40,13 +41,9 @@ const fullJSON = ref('{\n  "name": "",\n  "enabled": true,\n  "priority": 100,\n
 const updateSpec = ref({ version: '', syncParams: true, resetToDefault: false, note: '' })
 const showManifest = ref(false)
 
-// 插件源码（声明式定义）——与 MCP plugin_code_* 工具同源
-const source = ref(null)
-const sourceText = ref('')
-const sourcePatch = ref('{\n  "request.headers.X-Stage": "v2"\n}')
-const sourceBusy = ref(false)
-const validateResult = ref(null)
-const exportResult = ref(null)
+// 图片有效性巡检：跟随全局（0）或为该插件单独设定周期。
+const validityHours = ref(0)
+const validitySaving = ref(false)
 
 const fields = computed(() => (view.value?.manifest?.params || []))
 const fileTypeOptions = Object.entries(categoryLabels)
@@ -98,6 +95,7 @@ async function load() {
     view.value = v
     initForm(v)
     schedule.value = { priority: v.priority ?? 100, fileTypes: [...(v.fileTypes || [])] }
+    validityHours.value = v.manifest?.validity?.intervalHours || 0
   } catch (e) { notifyError(e, '加载插件失败') }
   finally { loading.value = false }
 }
@@ -184,44 +182,23 @@ async function applyUpdate() {
   } catch (e) { notifyError(e, '更新失败') }
 }
 
-async function loadSource() {
+async function saveValidity() {
+  if (!view.value?.manifest) return
+  validitySaving.value = true
   try {
-    const r = await api('/plugins/' + encodeURIComponent(id.value) + '/source')
-    source.value = r
-    sourceText.value = r.sourceJSON || ''
-    validateResult.value = null
-    exportResult.value = null
-  } catch (e) { notifyError(e, '读取插件源码失败') }
+    const manifest = JSON.parse(JSON.stringify(view.value.manifest))
+    manifest.validity = { ...(manifest.validity || {}), intervalHours: Number(validityHours.value) || 0 }
+    await api(`/plugins/${encodeURIComponent(id.value)}/manifest`, { method: 'PUT', body: { manifest } })
+    notify(
+      Number(validityHours.value) > 0
+        ? `该插件产出的图片每 ${validityHours.value} 小时巡检一次`
+        : '已改为跟随系统设置的全局巡检间隔',
+      { title: '图片有效性' },
+    )
+    await load()
+  } catch (e) { notifyError(e, '保存失败') } finally { validitySaving.value = false }
 }
-async function validateSource() {
-  sourceBusy.value = true
-  try {
-    validateResult.value = await api('/plugins/validate', { method: 'POST', body: { definition: sourceText.value, params: form.value } })
-    notify(validateResult.value?.valid ? '源码校验通过' : '源码存在问题，请查看下方提示', { type: validateResult.value?.valid ? 'success' : 'error' })
-  } catch (e) { notifyError(e, '校验失败') } finally { sourceBusy.value = false }
-}
-async function saveSource() {
-  sourceBusy.value = true
-  try {
-    await api('/plugins/' + encodeURIComponent(id.value) + '/source', { method: 'PUT', body: { definition: sourceText.value } })
-    notify('插件源码已即时生效，无需重启', { title: 'plugin_code_upload' })
-    await load(); await loadSource()
-  } catch (e) { notifyError(e, '保存源码失败') } finally { sourceBusy.value = false }
-}
-async function patchSource() {
-  sourceBusy.value = true
-  try {
-    await api('/plugins/' + encodeURIComponent(id.value) + '/source', { method: 'PATCH', body: { patch: JSON.parse(sourcePatch.value) } })
-    notify('差量修改已应用', { title: 'plugin_code_patch' })
-    await load(); await loadSource()
-  } catch (e) { notifyError(e, '差量修改失败') } finally { sourceBusy.value = false }
-}
-async function exportSource(format) {
-  try {
-    exportResult.value = await api('/plugins/' + encodeURIComponent(id.value) + '/export?format=' + format)
-    notify('已生成 ' + format.toUpperCase() + ' 导出内容')
-  } catch (e) { notifyError(e, '导出失败') }
-}
+
 async function deletePlugin() {
   if (!window.confirm(`确认删除插件「${view.value?.name || id.value}」？该操作不可撤销，变更记录会保留。`)) return
   try {
@@ -234,7 +211,6 @@ async function deletePlugin() {
 function switchTab(t) {
   tab.value = t
   if (t === 'changes') loadChanges()
-  if (t === 'source') loadSource()
 }
 </script>
 
@@ -306,6 +282,34 @@ function switchTab(t) {
                   <Save />{{ scheduleSaving ? '保存中…' : '保存调度设置' }}
                 </Button>
                 <span class="text-[11px] text-muted-foreground">也可用 MCP 的 plugin_patch 设置 priority / fileTypes</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader class="pb-4">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <CardTitle>图片有效性巡检</CardTitle>
+                  <CardDescription class="mt-1">
+                    该插件产出并归档到本站的图片，会按周期用 HEAD 请求确认「仍能返回图片」，只读响应头、不下载正文。
+                  </CardDescription>
+                </div>
+                <Badge variant="outline">{{ validityHours > 0 ? validityHours + ' 小时' : '跟随系统' }}</Badge>
+              </div>
+            </CardHeader>
+            <CardContent class="grid gap-4 border-t pt-4 sm:grid-cols-[12rem_1fr]">
+              <Field label="巡检间隔（小时）" hint="0 表示跟随系统设置的全局间隔；连续失败达到阈值才标记失效并告警。">
+                <div class="flex items-center gap-1.5">
+                  <Input v-model.number="validityHours" type="number" min="0" max="720" step="1" />
+                  <ImageOff class="size-3.5 shrink-0 text-muted-foreground" />
+                </div>
+              </Field>
+              <div class="flex flex-wrap items-center gap-2 sm:items-end">
+                <Button size="sm" :disabled="validitySaving" @click="saveValidity">
+                  <Save />{{ validitySaving ? '保存中…' : '保存巡检间隔' }}
+                </Button>
+                <span class="text-[11px] text-muted-foreground">默认 72 小时（3 天）一次；也可用 MCP 的 plugin_manifest_update 修改 validity.intervalHours</span>
               </div>
             </CardContent>
           </Card>
@@ -418,73 +422,31 @@ function switchTab(t) {
         </Card>
       </TabContent>
 
-      <!-- 插件源码 -->
+      <!-- 插件源码：真正的 Go 文件夹 -->
       <TabContent value="source">
-        <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="mb-3 flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">
-            <h2 class="text-sm font-semibold">声明式插件源码</h2>
+            <h2 class="text-sm font-semibold">插件源码</h2>
             <p class="mt-1 max-w-3xl text-[11.5px] leading-relaxed text-muted-foreground">
-              一份 JSON 定义参数 Schema、请求模板与响应映射；保存后立即编译生效、无需重启，与 MCP 的 plugin_code_* 工具完全同源。
+              插件是一个 Go 文件夹：<code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">plugin.json</code> 声明参数与元信息，
+              <code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">*.go</code> 实现上传逻辑。保存任意 .go 文件即自动编译并生效，
+              与 MCP 的 plugin_files / plugin_file_write / plugin_build 完全同源。
             </p>
           </div>
           <div class="flex items-center gap-1.5">
-            <Badge :variant="source?.editable ? 'success' : 'warning'">{{ source?.editable ? '可编辑' : '只读 · 内置插件' }}</Badge>
-            <Badge variant="outline">rev {{ source?.revision }}</Badge>
+            <Badge :variant="view?.editable ? 'success' : 'warning'">{{ view?.editable ? '可编辑' : '内置 · 源码只读' }}</Badge>
+            <Badge :variant="view?.built ? 'success' : 'outline'">{{ view?.built ? '已编译' : '未编译' }}</Badge>
+            <Badge variant="outline">rev {{ view?.revision }}</Badge>
           </div>
         </div>
-
-        <Card class="mt-3">
-          <CardContent>
-            <Field label="Plugin Source（JSON）" hint="模板变量 {{base_url}} 必须在 params 中声明；内置变量：file_name / mime_type / bucket / object_key / file_size / timestamp / unix。响应路径支持点号与数组下标。">
-              <textarea
-                v-model="sourceText" :readonly="!source?.editable" spellcheck="false"
-                class="min-h-[340px] w-full resize-y rounded-md border border-input bg-background px-3 py-2.5 font-mono text-[11.5px] leading-[1.65] shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25 read-only:bg-muted/40"
-              />
-            </Field>
-            <div class="mt-3 flex flex-wrap gap-2">
-              <Button variant="outline" :disabled="sourceBusy" @click="validateSource"><Check />静态校验</Button>
-              <Button :disabled="sourceBusy || !source?.editable" @click="saveSource"><Save />保存源码（全量）</Button>
-              <Button variant="outline" :disabled="sourceBusy" @click="exportSource('json')"><Download />导出 JSON</Button>
-              <Button variant="outline" :disabled="sourceBusy" @click="exportSource('go')"><Download />导出 Go 源码</Button>
-              <Button v-if="source?.custom" variant="destructive" size="sm" class="ml-auto" @click="deletePlugin"><Trash2 />删除插件</Button>
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card v-if="source?.editable" class="mt-4">
-          <CardHeader class="pb-4">
-            <CardTitle>差量修改源码</CardTitle>
-            <CardDescription>支持点号路径（如 request.headers.Authorization），值为 null 表示删除该字段；params 数组按 key 合并，未涉及的字段保持不变。</CardDescription>
-          </CardHeader>
-          <CardContent class="border-t pt-4">
-            <Field label="Patch JSON">
-              <textarea
-                v-model="sourcePatch" spellcheck="false"
-                class="min-h-28 w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-[11.5px] leading-relaxed shadow-xs focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/25"
-              />
-            </Field>
-            <Button size="sm" class="mt-3" :disabled="sourceBusy" @click="patchSource"><Code2 />应用差量修改</Button>
-          </CardContent>
-        </Card>
-
-        <Card v-if="validateResult" class="mt-4">
-          <div class="flex items-center justify-between gap-3 border-b px-4 py-3">
-            <span class="text-[13px] font-medium">校验结果</span>
-            <Badge :variant="validateResult.valid ? 'success' : 'destructive'">{{ validateResult.valid ? 'PASS' : 'FAIL' }}</Badge>
-          </div>
-          <div class="space-y-2 p-4">
-            <p v-if="validateResult.paramsError" class="text-[11.5px] text-destructive">{{ validateResult.paramsError }}</p>
-            <p v-if="validateResult.missingRequired?.length" class="text-[11.5px] text-muted-foreground">
-              缺少必填参数：{{ validateResult.missingRequired.join(', ') }}
-            </p>
-            <p class="text-[10.5px] font-medium tracking-wide text-muted-foreground">请求预览（敏感值已脱敏）</p>
-            <CodeBlock :code="JSON.stringify(validateResult.requestPreview, null, 2)" max-height="360px" />
-          </div>
-        </Card>
-
-        <div v-if="exportResult" class="mt-4">
-          <p class="mb-2 font-mono text-[10.5px] uppercase tracking-wide text-muted-foreground">导出 · {{ exportResult.filename }}</p>
-          <CodeBlock :code="exportResult.content" label="export" max-height="360px" />
+        <PluginSource
+          :id="id" :editable="!!view?.editable" :built="!!view?.built"
+          :toolchain="view?.toolchain !== false" :build-error="view?.buildError || ''"
+          @changed="load"
+        />
+        <div class="mt-4 flex flex-wrap items-center gap-2">
+          <Button v-if="view?.custom" variant="destructive" size="sm" @click="deletePlugin"><Trash2 />删除插件</Button>
+          <span class="text-[11px] text-muted-foreground">内置插件不可删除，只能停用；自定义插件删除后变更记录仍保留。</span>
         </div>
       </TabContent>
 
@@ -558,12 +520,11 @@ function switchTab(t) {
         <div class="mt-5">
           <div class="mb-2 flex items-center justify-between gap-3">
             <div>
-              <h2 class="text-sm font-semibold">示例代码</h2>
-              <p class="mt-0.5 text-[11.5px] text-muted-foreground">实现 Uploader 接口的最小骨架</p>
+              <h2 class="text-sm font-semibold">插件清单</h2>
+              <p class="mt-0.5 text-[11.5px] text-muted-foreground">plugin.json 是参数 Schema 的唯一来源，参数表单由它自动生成</p>
             </div>
             <Button size="sm" variant="outline" @click="showManifest = !showManifest">{{ showManifest ? '收起 Manifest' : '完整 Manifest' }}</Button>
           </div>
-          <CodeBlock :code="view?.manifest?.sampleCode || ''" label="sample" />
           <div v-if="showManifest" class="mt-3">
             <CodeBlock :code="JSON.stringify(view?.manifest, null, 2)" label="manifest.json" max-height="420px" />
           </div>

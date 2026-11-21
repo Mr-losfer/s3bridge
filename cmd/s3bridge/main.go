@@ -42,6 +42,7 @@ func run() error {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	core.Validity.Start(rootCtx)
 	if err := core.Health.Start(rootCtx); err != nil {
 		return fmt.Errorf("启动健康调度: %w", err)
 	}

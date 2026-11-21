@@ -26,7 +26,7 @@ const buckets = ref([])
 const loading = ref(false)
 const initial = ref(true)
 const done = ref(false)
-const filter = ref({ bucket: '', q: '', range: '' })
+const filter = ref({ bucket: '', q: '', range: '', validity: '' })
 
 const sentinel = ref(null)
 let observer = null
@@ -98,6 +98,7 @@ async function load(reset = false) {
     if (filter.value.bucket) q.set('bucket', filter.value.bucket)
     if (filter.value.q) q.set('q', filter.value.q)
     if (filter.value.range) q.set('from', filter.value.range)
+    if (filter.value.validity) q.set('validity', filter.value.validity)
     const r = await api('/gallery?' + q.toString())
     items.value = reset ? (r.items || []) : [...items.value, ...(r.items || [])]
     cursor.value = r.nextCursor || ''
@@ -128,7 +129,7 @@ function onSearch() {
   searchTimer = setTimeout(() => load(true), 320)
 }
 
-watch(() => [filter.value.bucket, filter.value.range], () => load(true))
+watch(() => [filter.value.bucket, filter.value.range, filter.value.validity], () => load(true))
 
 // ---------- 灯箱 ----------
 function openAt(i) {
@@ -185,7 +186,7 @@ onUnmounted(() => {
   <div>
     <PageHeader
       title="图片相册"
-      description="跨存储桶汇集全站图片，像相册一样浏览：流式加载、两种卡片布局、点开即看大图与元数据。"
+      description="跨存储桶汇集全站图片，像相册一样浏览：流式加载、两种卡片布局、点开即看大图与元数据；巡检失效的图片会被明确标记。"
     >
       <template #actions>
         <div class="flex items-center gap-1 rounded-lg border bg-card p-1">
@@ -215,6 +216,11 @@ onUnmounted(() => {
       <Select v-model="filter.range" class="h-9 w-full sm:w-40">
         <option v-for="r in rangeOptions" :key="r.value" :value="r.value">{{ r.label }}</option>
       </Select>
+      <Select v-model="filter.validity" class="h-9 w-full sm:w-36">
+        <option value="">全部有效性</option>
+        <option value="ok">正常</option>
+        <option value="invalid">已失效</option>
+      </Select>
       <div class="relative col-span-2 w-full sm:col-span-1 sm:w-64">
         <Search class="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
         <Input v-model="filter.q" placeholder="搜索文件名或对象键" class="h-9 pl-8" @input="onSearch" />
@@ -238,6 +244,13 @@ onUnmounted(() => {
           @click="openAt(i)"
         >
           <ObjectThumb :bucket="it.bucket" :object-key="it.objectKey" :alt="it.fileName" :thumb-width="480" />
+          <span
+            v-if="it.validity?.status === 'invalid'"
+            class="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded-md bg-destructive/90 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm"
+            :title="it.validity.error || '巡检确认该图片已无法返回'"
+          >
+            <ImageOff class="size-3" />已失效
+          </span>
           <span class="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 via-black/25 to-transparent px-2.5 pb-2 pt-6 opacity-0 transition-opacity group-hover:opacity-100">
             <span class="block truncate text-[11px] font-medium text-white">{{ it.fileName }}</span>
             <span class="mt-0.5 block text-[10px] text-white/70">{{ it.bucket }} · {{ formatBytes(it.size) }}</span>
@@ -253,7 +266,16 @@ onUnmounted(() => {
             class="group block w-full overflow-hidden rounded-xl border bg-card text-left transition-shadow hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
             @click="openAt(items.indexOf(it))"
           >
-            <ObjectThumb :bucket="it.bucket" :object-key="it.objectKey" :alt="it.fileName" :thumb-width="480" aspect="auto" />
+            <div class="relative">
+              <ObjectThumb :bucket="it.bucket" :object-key="it.objectKey" :alt="it.fileName" :thumb-width="480" aspect="auto" />
+              <span
+                v-if="it.validity?.status === 'invalid'"
+                class="absolute left-1.5 top-1.5 inline-flex items-center gap-1 rounded-md bg-destructive/90 px-1.5 py-0.5 text-[10px] font-medium text-white shadow-sm"
+                :title="it.validity.error || '巡检确认该图片已无法返回'"
+              >
+                <ImageOff class="size-3" />已失效
+              </span>
+            </div>
             <span class="block px-2.5 py-2">
               <span class="block truncate text-[11px] font-medium">{{ it.fileName }}</span>
               <span class="mt-0.5 block truncate text-[10px] text-muted-foreground">{{ it.bucket }} · {{ formatBytes(it.size) }} · {{ relTime(it.createdAt) }}</span>
@@ -275,7 +297,7 @@ onUnmounted(() => {
       :title="filter.q ? '没有匹配的图片' : '相册还是空的'"
       :description="filter.q ? '换个关键词，或清空筛选条件。' : '上传图片后会自动出现在这里，支持跨桶统一浏览。'"
     >
-      <Button v-if="filter.q || filter.bucket || filter.range" variant="outline" @click="filter = { bucket: '', q: '', range: '' }; load(true)">
+      <Button v-if="filter.q || filter.bucket || filter.range || filter.validity" variant="outline" @click="filter = { bucket: '', q: '', range: '', validity: '' }; load(true)">
         清空筛选
       </Button>
     </Empty>
@@ -337,6 +359,16 @@ onUnmounted(() => {
           <span>{{ current.mimeType }}</span>
           <span>{{ fmtTime(current.createdAt) }}</span>
           <span v-if="current.pluginId">via {{ current.pluginId }}</span>
+          <span
+            v-if="current.validity?.status === 'invalid'"
+            class="inline-flex items-center gap-1 rounded bg-destructive/80 px-1.5 py-0.5 text-white"
+            :title="current.validity.error || ''"
+          >
+            <ImageOff class="size-3" />巡检失效 · {{ relTime(current.validity.checkedAt) }}
+          </span>
+          <span v-else-if="current.validity?.status === 'ok'" class="text-white/45">
+            巡检正常 · {{ relTime(current.validity.checkedAt) }}
+          </span>
           <span class="ml-auto">{{ lightbox + 1 }} / {{ items.length }}</span>
         </div>
       </div>

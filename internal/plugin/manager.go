@@ -2,94 +2,240 @@ package plugin
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/Mr-losfer/s3bridge/internal/plugin/runtime"
+	"github.com/Mr-losfer/s3bridge/internal/plugin/sdk"
 	"github.com/Mr-losfer/s3bridge/internal/store"
 )
 
-// Manager 负责插件实例的生命周期：注册、差量/全量修改、参数更新、
-// 版本更新、调试、健康检测与异常告警。
+// Builtin 是随二进制发布的内置插件源码（plugin.json + *.go）。
+type Builtin struct {
+	ID    string
+	Files map[string]string
+}
+
+// Manager 负责插件实例生命周期：文件夹、构建、调用、参数、调度与告警。
 type Manager struct {
 	st           store.Store
-	registry     *Registry
+	rt           *runtime.Runtime
+	pluginsDir   string
 	seal         func(string) (string, error)
 	open         func(string) (string, error)
 	defaultEvery time.Duration
+	builtins     []Builtin
 }
 
-func NewManager(st store.Store, reg *Registry, seal, open func(string) (string, error), defaultEvery time.Duration) *Manager {
-	return &Manager{st: st, registry: reg, seal: seal, open: open, defaultEvery: defaultEvery}
+func NewManager(st store.Store, rt *runtime.Runtime, pluginsDir string, seal, open func(string) (string, error), defaultEvery time.Duration, builtins []Builtin) *Manager {
+	return &Manager{
+		st: st, rt: rt, pluginsDir: pluginsDir,
+		seal: seal, open: open, defaultEvery: defaultEvery, builtins: builtins,
+	}
 }
 
-func (m *Manager) Registry() *Registry { return m.registry }
-func (m *Manager) Store() store.Store  { return m.st }
+func (m *Manager) Store() store.Store { return m.st }
+
+// Runtime 暴露运行时信息（工具链、构建等），供 API 展示与测试使用。
+func (m *Manager) Runtime() *runtime.Runtime { return m.rt }
 
 // View 是插件列表/详情的对外视图，敏感参数已脱敏。
 type View struct {
 	store.Plugin
-	Params      map[string]any `json:"params"` // 遮蔽内层 Params，避免密文外泄
-	Definition  string         `json:"-"`      // 遮蔽：完整源码由 plugin_code_get 单独返回，避免列表膨胀
+	Params      map[string]any `json:"params"`
+	Definition  string         `json:"-"`
 	Manifest    Manifest       `json:"manifest"`
 	Warning     string         `json:"warning"`
 	Grouped     []ParamGroup   `json:"grouped"`
 	HasManifest bool           `json:"hasManifest"`
-	Editable    bool           `json:"editable"` // 源码是否可由 MCP/后台编辑
+	Editable    bool           `json:"editable"`
+	Toolchain   bool           `json:"toolchain"`
+	Built       bool           `json:"built"`
+	SourceFiles int            `json:"sourceFiles"`
 }
 
-type ParamGroup struct {
-	Name   string       `json:"name"`
-	Fields []ParamField `json:"fields"`
+// DebugReport 是一次诊断结果。
+type DebugReport struct {
+	PluginID  string      `json:"pluginId"`
+	Version   string      `json:"version"`
+	Steps     []DebugStep `json:"steps"`
+	Traces    []Trace     `json:"traces,omitempty"`
+	Healthy   bool        `json:"healthy"`
+	CheckedAt time.Time   `json:"checkedAt"`
 }
 
-// EnsureBuiltin 把注册表中尚未实例化的插件类型写入存储（幂等，可反复调用）。
+type DebugStep struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"` // pass|warn|fail
+	Detail     string `json:"detail"`
+	DurationMs int64  `json:"durationMs"`
+}
+
+type BuildReport struct {
+	OK         bool      `json:"ok"`
+	Output     string    `json:"output"`
+	DurationMs int64     `json:"durationMs"`
+	SHA256     string    `json:"sha256,omitempty"`
+	Size       int64     `json:"size,omitempty"`
+	At         time.Time `json:"at"`
+}
+
+// ---------- 内置插件与迁移 ----------
+
+// EnsureBuiltin 落盘内置插件源码、同步存储记录，并迁移旧声明式插件。
 func (m *Manager) EnsureBuiltin() error {
-	return m.st.Update(func(st *store.State) error {
-		for _, mf := range m.registry.List() {
-			if store.PluginByID(st, mf.Kind) != nil {
-				continue
-			}
-			now := store.NowUTC()
+	for _, b := range m.builtins {
+		if err := m.ensureBuiltin(b); err != nil {
+			return err
+		}
+	}
+	return m.migrateLegacy()
+}
+
+func (m *Manager) ensureBuiltin(b Builtin) error {
+	dir := filepath.Join(m.pluginsDir, b.ID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	// 只在文件缺失时写入：用户对内置插件的本地修改不会被覆盖。
+	for name, content := range b.Files {
+		path := filepath.Join(dir, name)
+		if _, err := os.Stat(path); err == nil {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		if err := writeFileAtomic(path, []byte(content)); err != nil {
+			return fmt.Errorf("写出内置插件文件 %s: %w", name, err)
+		}
+	}
+	mf, err := LoadManifest(dir)
+	if err != nil {
+		return fmt.Errorf("内置插件 %s 清单无效: %w", b.ID, err)
+	}
+	if err := EnsureGoMod(dir, b.ID, m.rt.SDKPath()); err != nil {
+		return err
+	}
+
+	// 同步存储：保留用户参数、调度与健康设置，只更新描述性字段。
+	err = m.st.Update(func(st *store.State) error {
+		now := store.NowUTC()
+		p := store.PluginByID(st, b.ID)
+		if p == nil {
 			every := int(m.defaultEvery.Seconds())
 			if mf.Health.IntervalSecs > 0 {
 				every = mf.Health.IntervalSecs
 			}
 			types, _ := ParseFileTypes(mf.FileTypes)
 			st.Plugins = append(st.Plugins, store.Plugin{
-				ID: mf.Kind, Kind: mf.Kind, Name: mf.Name,
-				Description: mf.Description, Version: mf.Version, Author: mf.Author,
-				Enabled: true, Priority: 100, FileTypes: types,
-				Params: DefaultParams(mf),
+				ID: b.ID, Kind: b.ID, Name: mf.Name, Description: mf.Description,
+				Version: mf.Version, Author: mf.Author, Enabled: true,
+				Priority: mf.Priority, FileTypes: types, Params: DefaultParams(mf),
 				Status: store.StatusUnknown, StatusMessage: "尚未执行健康检测",
 				Health: store.HealthConfig{
 					Enabled: mf.Health.Enabled, IntervalSecs: every,
-					TimeoutSecs:   mf.Health.TimeoutSecs,
-					FailThreshold: mf.Health.FailThreshold,
-					ProbeMode:     mf.Health.ProbeMode,
+					TimeoutSecs: mf.Health.TimeoutSecs, FailThreshold: mf.Health.FailThreshold,
+					ProbeMode: mf.Health.ProbeMode,
 				},
+				Dir: dir, ValidityHours: mf.Validity.IntervalHours,
 				Revision: 1, CreatedAt: now, UpdatedAt: now,
 			})
+			return nil
+		}
+		p.Kind, p.Name, p.Description, p.Version, p.Author = b.ID, mf.Name, mf.Description, mf.Version, mf.Author
+		p.Dir = dir
+		p.ValidityHours = mf.Validity.IntervalHours
+		p.Definition = "" // 旧声明式源码已迁移为文件夹
+		for _, f := range mf.Params {
+			if _, ok := p.Params[f.Key]; !ok && f.Default != "" {
+				if p.Params == nil {
+					p.Params = map[string]string{}
+				}
+				p.Params[f.Key] = f.Default
+			}
+		}
+		p.UpdatedAt = now
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// migrateLegacy 处理 v1.x 的声明式插件：内置类型转文件夹，自定义类型给出可编辑骨架。
+func (m *Manager) migrateLegacy() error {
+	var legacy []store.Plugin
+	_ = m.st.View(func(st *store.State) error {
+		for _, p := range st.Plugins {
+			if p.Definition != "" {
+				legacy = append(legacy, p)
+			}
 		}
 		return nil
 	})
+	for _, p := range legacy {
+		dir := filepath.Join(m.pluginsDir, p.ID)
+		_, statErr := os.Stat(filepath.Join(dir, "plugin.json"))
+		if statErr != nil {
+			// 自定义声明式插件无法自动翻译成 Go：生成一份带说明的骨架，原 JSON 留档。
+			mf := Manifest{
+				Schema: ManifestSchema, ID: p.ID, Name: p.Name, Version: p.Version,
+				Description: p.Description, Author: p.Author, Priority: p.Priority,
+				TimeoutSecs: 60, Health: HealthHint{Enabled: false, TimeoutSecs: 8, FailThreshold: 2},
+				Docs: "该插件由 v1.x 的声明式定义迁移而来。原定义见 legacy-definition.json。\n\n" +
+					"声明式请求模板已不再支持，请在 main.go 中用 Go 实现上传逻辑，保存后自动编译。",
+			}
+			_ = os.MkdirAll(dir, 0o700)
+			_ = SaveManifest(dir, mf)
+			_ = writeFileAtomic(filepath.Join(dir, "legacy-definition.json"), []byte(p.Definition))
+			_ = writeFileAtomic(filepath.Join(dir, "main.go"), []byte(blankMain))
+			_ = EnsureGoMod(dir, p.ID, m.rt.SDKPath())
+			if err := m.st.Update(func(st *store.State) error {
+				cur := store.PluginByID(st, p.ID)
+				if cur == nil {
+					return nil
+				}
+				cur.Dir = dir
+				cur.Definition = ""
+				cur.Status = store.StatusUnhealthy
+				cur.StatusMessage = "声明式引擎已移除：请用 Go 重写 main.go 后保存编译"
+				cur.UpdatedAt = store.NowUTC()
+				st.Changes = append(st.Changes, newChange(p.ID, "migrate", "system", nil, "声明式插件迁移为 Go 骨架，等待重写"))
+				return nil
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		// 已有文件夹（内置插件或已迁移）：只清空旧字段。
+		_ = m.st.Update(func(st *store.State) error {
+			cur := store.PluginByID(st, p.ID)
+			if cur != nil {
+				cur.Definition = ""
+				cur.Dir = dir
+			}
+			return nil
+		})
+	}
+	return nil
 }
 
-// List 返回按「异常优先 → 优先级」排序的插件视图。
+// ---------- 查询 ----------
+
 func (m *Manager) List() ([]View, error) {
 	var out []View
 	err := m.st.View(func(st *store.State) error {
 		out = make([]View, 0, len(st.Plugins))
 		for i := range st.Plugins {
-			v, err := m.viewOf(&st.Plugins[i])
-			if err != nil {
-				return err
-			}
-			out = append(out, v)
+			out = append(out, m.viewOf(&st.Plugins[i]))
 		}
 		return nil
 	})
@@ -97,7 +243,6 @@ func (m *Manager) List() ([]View, error) {
 		return nil, err
 	}
 	sort.Slice(out, func(i, j int) bool {
-		// 列表顺序即调度顺序：权重高者在前，同权重时更健康的在前。
 		if out[i].Priority != out[j].Priority {
 			return out[i].Priority > out[j].Priority
 		}
@@ -117,326 +262,73 @@ func (m *Manager) Get(id string) (View, error) {
 		if p == nil {
 			return ErrPluginNotFound
 		}
-		var err error
-		v, err = m.viewOf(p)
-		return err
+		v = m.viewOf(p)
+		return nil
 	})
 	return v, err
 }
 
-// descriptorFor 统一解析插件描述符：内置类型走编译期注册表，
-// 自定义插件从落库的声明式源码即时编译，因此改码无需重启服务。
-func (m *Manager) descriptorFor(p *store.Plugin) (Descriptor, error) {
-	if d, err := m.registry.Get(p.Kind); err == nil {
-		return d, nil
+func (m *Manager) dirOf(p *store.Plugin) string {
+	if p.Dir != "" {
+		return p.Dir
 	}
-	if p.Definition != "" {
-		d, err := ParseDefinition([]byte(p.Definition))
-		if err != nil {
-			return Descriptor{}, fmt.Errorf("插件 %s 源码损坏: %w", p.ID, err)
-		}
-		return DescriptorFromDefinition(d), nil
-	}
-	return Descriptor{}, fmt.Errorf("%w: %s", ErrUnknownKind, p.Kind)
+	return filepath.Join(m.pluginsDir, p.ID)
 }
 
-func (m *Manager) viewOf(p *store.Plugin) (View, error) {
-	desc, err := m.descriptorFor(p)
+// viewOf 读取文件夹内清单并组装视图；清单损坏时降级为「不可用」而不是报错。
+func (m *Manager) viewOf(p *store.Plugin) View {
+	dir := m.dirOf(p)
 	view := View{Plugin: *p, Params: map[string]any{}, Grouped: []ParamGroup{}, Editable: p.Custom}
-	if err != nil {
-		view.Warning = fmt.Sprintf("插件源码不可用：%v", err)
-		view.HasManifest = false
-		return view, nil
+	view.Toolchain = m.rt != nil && m.rt.Toolchain() != ""
+	if m.rt != nil {
+		if fi, err := os.Stat(filepath.Join(dir, ".build", "plugin")); err == nil && fi.Size() > 0 {
+			view.Built = true
+		}
 	}
-	mf := desc.Manifest
+	mf, err := LoadManifest(dir)
+	if err != nil {
+		view.Warning = fmt.Sprintf("插件清单不可用：%v", err)
+		return view
+	}
 	view.HasManifest = true
 	view.Manifest = mf
-	view.Params = MaskParams(mf, p.Params)
-	plain, err := OpenParams(p.Params, m.open)
+	view.Grouped = SortedGroups(mf)
+	if files, err := ListFiles(dir, mf); err == nil {
+		for _, f := range files {
+			if f.Go {
+				view.SourceFiles++
+			}
+		}
+	}
+	if p.Enabled {
+		if _, err := OpenParams(p.Params, m.open); err == nil {
+			view.Params = MaskParams(mf, p.Params)
+			view.Warning = VolatileWarning(mf, mustPlain(p.Params, m.open))
+		}
+	} else {
+		view.Params = map[string]any{}
+	}
+	if p.BuildError != "" {
+		if view.Warning != "" {
+			view.Warning += "；"
+		}
+		view.Warning += "最近一次构建失败：" + truncateMsg(p.BuildError, 160)
+	}
+	return view
+}
+
+func mustPlain(params map[string]string, open func(string) (string, error)) map[string]string {
+	out, err := OpenParams(params, open)
 	if err != nil {
-		return view, err
+		return params
 	}
-	view.Warning = VolatileWarning(mf, plain)
-	// 按 Group 保序分组，供前端分区渲染动态表单。
-	seen := map[string]int{}
-	for _, f := range mf.Params {
-		idx, ok := seen[f.Group]
-		if !ok {
-			view.Grouped = append(view.Grouped, ParamGroup{Name: f.Group})
-			idx = len(view.Grouped) - 1
-			seen[f.Group] = idx
-		}
-		view.Grouped[idx].Fields = append(view.Grouped[idx].Fields, f)
-	}
-	return view, nil
+	return out
 }
 
-// ---------- 差量 / 全量 / 参数修改 ----------
+// ---------- 生命周期 ----------
 
-type Patch struct {
-	Name             *string               `json:"name,omitempty"`
-	Description      *string               `json:"description,omitempty"`
-	Enabled          *bool                 `json:"enabled,omitempty"`
-	Priority         *int                  `json:"priority,omitempty"`
-	FileTypes        *[]store.FileCategory `json:"fileTypes,omitempty"`
-	Params           map[string]string     `json:"params,omitempty"`
-	Health           *store.HealthConfig   `json:"health,omitempty"`
-	ExpectedRevision *int64                `json:"expectedRevision,omitempty"`
-}
-
-type Full struct {
-	Name             string               `json:"name"`
-	Description      string               `json:"description"`
-	Enabled          bool                 `json:"enabled"`
-	Priority         int                  `json:"priority"`
-	FileTypes        []store.FileCategory `json:"fileTypes"`
-	Params           map[string]string    `json:"params"`
-	Health           store.HealthConfig   `json:"health"`
-	ExpectedRevision *int64               `json:"expectedRevision,omitempty"`
-}
-
-// Patch 差量修改：只覆盖传入的字段，params 按键合并。
-func (m *Manager) Patch(id string, patch Patch, actor string) (View, error) {
-	err := m.st.Update(func(st *store.State) error {
-		p := store.PluginByID(st, id)
-		if p == nil {
-			return ErrPluginNotFound
-		}
-		if err := checkRevision(p, patch.ExpectedRevision); err != nil {
-			return err
-		}
-		mf, err := m.descriptorFor(p)
-		if err != nil {
-			return err
-		}
-		diff := map[string]string{}
-		if patch.Name != nil && *patch.Name != p.Name {
-			diff["name"] = p.Name + " → " + *patch.Name
-			p.Name = *patch.Name
-		}
-		if patch.Description != nil && *patch.Description != p.Description {
-			diff["description"] = "已更新"
-			p.Description = *patch.Description
-		}
-		if patch.Enabled != nil && *patch.Enabled != p.Enabled {
-			diff["enabled"] = fmt.Sprintf("%v → %v", p.Enabled, *patch.Enabled)
-			p.Enabled = *patch.Enabled
-			if !p.Enabled {
-				p.Status = store.StatusDisabled
-				p.StatusMessage = "已停用"
-			} else {
-				p.Status = store.StatusUnknown
-				p.StatusMessage = "等待下一次健康检测"
-			}
-		}
-		if patch.Priority != nil && *patch.Priority != p.Priority {
-			diff["priority"] = fmt.Sprintf("%d → %d", p.Priority, *patch.Priority)
-			p.Priority = *patch.Priority
-		}
-		if patch.FileTypes != nil {
-			types, err := normalizeFileTypes(*patch.FileTypes)
-			if err != nil {
-				return err
-			}
-			if !sameFileTypes(p.FileTypes, types) {
-				diff["fileTypes"] = fmt.Sprintf("%v → %v", FileTypeStrings(p.FileTypes), FileTypeStrings(types))
-				p.FileTypes = types
-			}
-		}
-		if patch.Health != nil {
-			if err := validateHealth(*patch.Health); err != nil {
-				return err
-			}
-			diff["health"] = fmt.Sprintf("每 %ds 检测", patch.Health.IntervalSecs)
-			p.Health = *patch.Health
-		}
-		if len(patch.Params) > 0 {
-			sealed, err := SealParams(mf.Manifest, patch.Params, m.seal)
-			if err != nil {
-				return err
-			}
-			plain, err := OpenParams(mergeParams(p.Params, sealed), m.open)
-			if err != nil {
-				return err
-			}
-			if err := ValidateParams(mf.Manifest, plain); err != nil {
-				return err
-			}
-			for k := range sealed {
-				label := k
-				if f, ok := FieldByKey(mf.Manifest, k); ok && f.Sensitive {
-					label += "(已脱敏)"
-				}
-				diff["param."+label] = "已更新"
-			}
-			p.Params = mergeParams(p.Params, sealed)
-		}
-		p.Revision++
-		p.UpdatedAt = store.NowUTC()
-		st.Changes = append(st.Changes, newChange(id, "patch", actor, diff, "差量修改"))
-		return nil
-	})
-	if err != nil {
-		return View{}, err
-	}
-	return m.Get(id)
-}
-
-// Replace 全量修改：未提供的字段重置为清单默认 / 零值。
-func (m *Manager) Replace(id string, full Full, actor string) (View, error) {
-	err := m.st.Update(func(st *store.State) error {
-		p := store.PluginByID(st, id)
-		if p == nil {
-			return ErrPluginNotFound
-		}
-		if err := checkRevision(p, full.ExpectedRevision); err != nil {
-			return err
-		}
-		mf, err := m.descriptorFor(p)
-		if err != nil {
-			return err
-		}
-		if err := validateHealth(full.Health); err != nil {
-			return err
-		}
-		params := map[string]string{}
-		if full.Params != nil {
-			params = full.Params
-		}
-		sealed, err := SealParams(mf.Manifest, params, m.seal)
-		if err != nil {
-			return err
-		}
-		plain, err := OpenParams(sealed, m.open)
-		if err != nil {
-			return err
-		}
-		if err := ValidateParams(mf.Manifest, plain); err != nil {
-			return err
-		}
-		name := full.Name
-		if name == "" {
-			name = mf.Manifest.Name
-		}
-		types, err := normalizeFileTypes(full.FileTypes)
-		if err != nil {
-			return err
-		}
-		p.Name = name
-		p.Description = full.Description
-		p.Enabled = full.Enabled
-		p.Priority = full.Priority
-		p.FileTypes = types
-		p.Health = full.Health
-		p.Params = sealed
-		p.Status = store.StatusUnknown
-		p.StatusMessage = "配置已全量替换，等待健康检测"
-		p.FailCount = 0
-		p.Revision++
-		p.UpdatedAt = store.NowUTC()
-		st.Changes = append(st.Changes, newChange(id, "replace", actor,
-			map[string]string{"params": "全量替换", "health": fmt.Sprintf("每 %ds", full.Health.IntervalSecs)},
-			"全量修改"))
-		return nil
-	})
-	if err != nil {
-		return View{}, err
-	}
-	return m.Get(id)
-}
-
-// SetParams 单独修改插件参数，MCP 的 plugin_params_set 使用。
-func (m *Manager) SetParams(id string, params map[string]string, actor string) (View, error) {
-	return m.Patch(id, Patch{Params: params}, actor)
-}
-
-// UpdateSpec 描述一次插件版本更新。
-type UpdateSpec struct {
-	Version        string `json:"version"`        // 留空则同步到内置版本
-	SyncParams     bool   `json:"syncParams"`     // 补齐清单中新增的参数默认值
-	ResetToDefault bool   `json:"resetToDefault"` // 把所有参数重置为清单默认
-	Note           string `json:"note"`
-}
-
-// Update 更新插件版本并迁移参数模板。
-func (m *Manager) Update(id string, spec UpdateSpec, actor string) (View, error) {
-	err := m.st.Update(func(st *store.State) error {
-		p := store.PluginByID(st, id)
-		if p == nil {
-			return ErrPluginNotFound
-		}
-		mf, err := m.descriptorFor(p)
-		if err != nil {
-			return err
-		}
-		target := strings.TrimSpace(spec.Version)
-		if target == "" {
-			target = mf.Manifest.Version
-		}
-		oldVersion := p.Version
-		if spec.ResetToDefault {
-			sealed, err := SealParams(mf.Manifest, DefaultParams(mf.Manifest), m.seal)
-			if err != nil {
-				return err
-			}
-			p.Params = sealed
-		} else if spec.SyncParams {
-			defaults := DefaultParams(mf.Manifest)
-			for k, v := range defaults {
-				if _, exists := p.Params[k]; !exists {
-					if p.Params == nil {
-						p.Params = map[string]string{}
-					}
-					p.Params[k] = v
-				}
-			}
-		}
-		p.Version = target
-		p.Description = mf.Manifest.Description
-		p.Author = mf.Manifest.Author
-		p.Revision++
-		p.UpdatedAt = store.NowUTC()
-		msg := spec.Note
-		if msg == "" {
-			msg = "插件更新"
-		}
-		st.Changes = append(st.Changes, newChange(id, "update", actor,
-			map[string]string{"version": oldVersion + " → " + target,
-				"syncParams": fmt.Sprintf("%v", spec.SyncParams)}, msg))
-		return nil
-	})
-	if err != nil {
-		return View{}, err
-	}
-	return m.Get(id)
-}
-
-// Toggle 启用或停用插件。
-func (m *Manager) Toggle(id string, enabled bool, actor string) (View, error) {
-	return m.Patch(id, Patch{Enabled: &enabled}, actor)
-}
-
-// ---------- 调试 / 检测 / 上传 ----------
-
-type DebugStep struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"` // pass | warn | fail
-	Detail     string `json:"detail"`
-	DurationMs int64  `json:"durationMs"`
-}
-
-type DebugReport struct {
-	PluginID  string      `json:"pluginId"`
-	Version   string      `json:"version"`
-	Steps     []DebugStep `json:"steps"`
-	Healthy   bool        `json:"healthy"`
-	CheckedAt time.Time   `json:"checkedAt"`
-}
-
-func (m *Manager) loadRunnable(id string) (store.Plugin, Manifest, Uploader, map[string]string, error) {
+func (m *Manager) loadRunnable(id string) (store.Plugin, Manifest, map[string]string, string, error) {
 	var p store.Plugin
-	var mf Manifest
-	var cfg map[string]string
 	err := m.st.View(func(st *store.State) error {
 		found := store.PluginByID(st, id)
 		if found == nil {
@@ -450,83 +342,75 @@ func (m *Manager) loadRunnable(id string) (store.Plugin, Manifest, Uploader, map
 		return nil
 	})
 	if err != nil {
-		return p, mf, nil, nil, err
+		return p, Manifest{}, nil, "", err
 	}
-	d, err := m.descriptorFor(&p)
+	dir := m.dirOf(&p)
+	mf, err := LoadManifest(dir)
 	if err != nil {
-		return p, mf, nil, nil, err
+		return p, mf, nil, dir, err
 	}
-	mf = d.Manifest
-	cfg, err = OpenParams(p.Params, m.open)
+	cfg, err := OpenParams(p.Params, m.open)
 	if err != nil {
-		return p, mf, nil, nil, err
+		return p, mf, nil, dir, err
 	}
-	return p, mf, d.New(), cfg, nil
+	return p, mf, cfg, dir, nil
 }
 
-// Debug 执行无副作用的诊断：参数校验 → 临时凭据有效期 → 上游连通性。
-func (m *Manager) Debug(ctx context.Context, id string) (DebugReport, error) {
-	p, mf, up, cfg, err := m.loadRunnable(id)
+// Upload 通过子进程调用插件完成一次上传。
+func (m *Manager) Upload(ctx context.Context, id string, req UploadRequest) (*UploadResult, error) {
+	p, mf, cfg, dir, err := m.loadRunnable(id)
 	if err != nil {
-		return DebugReport{}, err
+		return nil, err
 	}
-	report := DebugReport{PluginID: id, Version: p.Version, CheckedAt: store.NowUTC(), Steps: []DebugStep{}}
-	add := func(name, status, detail string, since time.Time) {
-		report.Steps = append(report.Steps, DebugStep{
-			Name: name, Status: status, Detail: detail,
-			DurationMs: time.Since(since).Milliseconds(),
-		})
+	if p.BuildError != "" && !m.builtExists(dir) {
+		return nil, fmt.Errorf("插件尚未成功构建：%s", p.BuildError)
 	}
-	start := time.Now()
-	if err := ValidateParams(mf, cfg); err != nil {
-		add("参数校验", "fail", err.Error(), start)
-		return m.finishDebug(id, report, actorSystem), nil
+	if m.rt == nil {
+		return nil, errors.New("插件运行时未初始化")
 	}
-	add("参数校验", "pass", fmt.Sprintf("%d 项参数通过校验", len(mf.Params)), start)
-
-	start = time.Now()
-	if w := VolatileWarning(mf, cfg); w != "" {
-		status := "warn"
-		if strings.Contains(w, "已于") || strings.Contains(w, "未设置") {
-			status = "fail"
-		}
-		add("临时凭据有效期", status, w, start)
-	} else {
-		add("临时凭据有效期", "pass", "凭据有效或无需轮换", start)
+	buildCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	err = m.rt.EnsureBuilt(buildCtx, id, dir)
+	cancel()
+	if err != nil {
+		return nil, fmt.Errorf("插件未就绪: %w", err)
 	}
 
-	start = time.Now()
-	probeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(mf.TimeoutSecs)*time.Second)
 	defer cancel()
-	if err := up.Check(probeCtx, cfg); err != nil {
-		add("上游连通性", "fail", err.Error(), start)
-	} else {
-		add("上游连通性", "pass", mf.Endpoint, start)
+	start := time.Now()
+	resp, err := m.rt.Call(callCtx, id, dir, sdk.Request{
+		ID: newCallID(), Method: "upload", Config: cfg,
+		Input: &sdk.Input{
+			FileName: req.FileName, MimeType: req.MimeType, Size: req.Size,
+			Path: req.Path, Bucket: req.Bucket, ObjectKey: req.ObjectKey, UserID: req.UserID,
+		},
+		TimeoutSecs: mf.TimeoutSecs,
+	})
+	latency := time.Since(start).Milliseconds()
+	if err != nil {
+		_ = m.st.Update(func(st *store.State) error {
+			if cur := store.PluginByID(st, id); cur != nil {
+				cur.LatencyMs = latency
+				cur.StatusMessage = truncateMsg("上传失败："+err.Error(), 300)
+			}
+			return nil
+		})
+		return nil, err
 	}
-	report.Healthy = true
-	for _, s := range report.Steps {
-		if s.Status == "fail" {
-			report.Healthy = false
-			break
-		}
-	}
-	return m.finishDebug(id, report, actorSystem), nil
-}
-
-const actorSystem = "system"
-
-func (m *Manager) finishDebug(id string, r DebugReport, actor string) DebugReport {
+	out := convertOutput(resp.Result, req, id)
 	_ = m.st.Update(func(st *store.State) error {
-		st.Changes = append(st.Changes, newChange(id, "debug", actor, nil,
-			fmt.Sprintf("调试完成：healthy=%v，%d 个步骤", r.Healthy, len(r.Steps))))
+		if cur := store.PluginByID(st, id); cur != nil {
+			cur.LatencyMs = latency
+			cur.LastSuccessAt = ptrTime(store.NowUTC())
+		}
 		return nil
 	})
-	return r
+	return out, nil
 }
 
 // Check 执行一次健康检测，更新状态机并按需产生/恢复告警。
 func (m *Manager) Check(ctx context.Context, id string) error {
-	p, mf, up, cfg, err := m.loadRunnable(id)
+	p, mf, cfg, dir, err := m.loadRunnable(id)
 	if err != nil {
 		if errors.Is(err, ErrPluginDisabled) || errors.Is(err, ErrPluginNotFound) {
 			return nil
@@ -537,13 +421,27 @@ func (m *Manager) Check(ctx context.Context, id string) error {
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
-	checkCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-
+	// 首次调用前先确保编译完成：编译可能耗时数秒，不能占用健康检测的超时预算。
 	start := time.Now()
 	var checkErr error
-	if checkErr = ValidateParams(mf, cfg); checkErr == nil {
-		checkErr = up.Check(checkCtx, cfg)
+	if m.rt == nil {
+		checkErr = errors.New("插件运行时未初始化")
+	} else if err := m.buildIfMissing(ctx, id, dir); err != nil {
+		checkErr = err
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if checkErr == nil {
+		if _, callErr := m.rt.Call(checkCtx, id, dir, sdk.Request{
+			ID: newCallID(), Method: "check", Config: cfg, TimeoutSecs: p.Health.TimeoutSecs,
+		}); callErr != nil {
+			checkErr = callErr
+		}
+	}
+	if checkErr == nil {
+		if w := VolatileWarning(mf, cfg); strings.Contains(w, "已于") || strings.Contains(w, "未设置") {
+			checkErr = errors.New(w)
+		}
 	}
 	latency := time.Since(start).Milliseconds()
 
@@ -588,28 +486,530 @@ func (m *Manager) Check(ctx context.Context, id string) error {
 	})
 }
 
+// Debug 执行无副作用诊断：参数 → 凭据有效期 → 构建 → 插件自检，并带回请求追踪。
+func (m *Manager) Debug(ctx context.Context, id string) (DebugReport, error) {
+	p, mf, cfg, dir, err := m.loadRunnable(id)
+	if err != nil {
+		return DebugReport{}, err
+	}
+	report := DebugReport{PluginID: id, Version: p.Version, CheckedAt: store.NowUTC(), Steps: []DebugStep{}}
+	add := func(name, status, detail string, since time.Time) {
+		report.Steps = append(report.Steps, DebugStep{Name: name, Status: status, Detail: detail, DurationMs: time.Since(since).Milliseconds()})
+	}
+
+	start := time.Now()
+	if err := ValidateParams(mf, cfg); err != nil {
+		add("参数校验", "fail", err.Error(), start)
+		return m.finishDebug(id, report, actorSystem), nil
+	}
+	add("参数校验", "pass", fmt.Sprintf("%d 项参数通过校验", len(mf.Params)), start)
+
+	start = time.Now()
+	if w := VolatileWarning(mf, cfg); w != "" {
+		status := "warn"
+		if strings.Contains(w, "已于") || strings.Contains(w, "未设置") {
+			status = "fail"
+		}
+		add("临时凭据有效期", status, w, start)
+	} else {
+		add("临时凭据有效期", "pass", "凭据有效或无需轮换", start)
+	}
+
+	start = time.Now()
+	if m.rt == nil {
+		add("编译产物", "fail", "插件运行时未初始化", start)
+	} else if err := m.rt.EnsureBuilt(ctx, id, dir); err != nil {
+		add("编译产物", "fail", err.Error(), start)
+	} else {
+		add("编译产物", "pass", "可执行文件就绪", start)
+	}
+
+	start = time.Now()
+	if m.rt != nil {
+		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		resp, err := m.rt.Call(probeCtx, id, dir, sdk.Request{
+			ID: newCallID(), Method: "check", Config: cfg, TimeoutSecs: 10,
+		})
+		cancel()
+		report.Traces = convertTraces(resp.Traces)
+		if err != nil {
+			add("插件自检", "fail", err.Error(), start)
+		} else {
+			add("插件自检", "pass", fmt.Sprintf("插件返回正常，产生 %d 次请求", len(resp.Traces)), start)
+		}
+	}
+	report.Healthy = true
+	for _, s := range report.Steps {
+		if s.Status == "fail" {
+			report.Healthy = false
+			break
+		}
+	}
+	return m.finishDebug(id, report, actorSystem), nil
+}
+
+const actorSystem = "system"
+
+func (m *Manager) finishDebug(id string, r DebugReport, actor string) DebugReport {
+	_ = m.st.Update(func(st *store.State) error {
+		st.Changes = append(st.Changes, newChange(id, "debug", actor, nil,
+			fmt.Sprintf("调试完成：healthy=%v，%d 个步骤，%d 次请求", r.Healthy, len(r.Steps), len(r.Traces))))
+		return nil
+	})
+	return r
+}
+
+// ---------- 修改 ----------
+
+type Patch struct {
+	Name             *string               `json:"name,omitempty"`
+	Description      *string               `json:"description,omitempty"`
+	Enabled          *bool                 `json:"enabled,omitempty"`
+	Priority         *int                  `json:"priority,omitempty"`
+	FileTypes        *[]store.FileCategory `json:"fileTypes,omitempty"`
+	Params           map[string]string     `json:"params,omitempty"`
+	Health           *store.HealthConfig   `json:"health,omitempty"`
+	ExpectedRevision *int64                `json:"expectedRevision,omitempty"`
+}
+
+type Full struct {
+	Name             string               `json:"name"`
+	Description      string               `json:"description"`
+	Enabled          bool                 `json:"enabled"`
+	Priority         int                  `json:"priority"`
+	FileTypes        []store.FileCategory `json:"fileTypes"`
+	Params           map[string]string    `json:"params"`
+	Health           store.HealthConfig   `json:"health"`
+	ExpectedRevision *int64               `json:"expectedRevision,omitempty"`
+}
+
+func (m *Manager) Patch(id string, patch Patch, actor string) (View, error) {
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		if err := checkRevision(p, patch.ExpectedRevision); err != nil {
+			return err
+		}
+		if patch.Name != nil {
+			p.Name = strings.TrimSpace(*patch.Name)
+		}
+		if patch.Description != nil {
+			p.Description = strings.TrimSpace(*patch.Description)
+		}
+		if patch.Enabled != nil {
+			p.Enabled = *patch.Enabled
+			if !p.Enabled {
+				p.Status = store.StatusDisabled
+			} else if p.Status == store.StatusDisabled {
+				p.Status = store.StatusUnknown
+			}
+		}
+		if patch.Priority != nil {
+			p.Priority = *patch.Priority
+		}
+		if patch.FileTypes != nil {
+			types, err := normalizeFileTypes(*patch.FileTypes)
+			if err != nil {
+				return err
+			}
+			p.FileTypes = types
+		}
+		if patch.Health != nil {
+			if err := validateHealth(*patch.Health); err != nil {
+				return err
+			}
+			p.Health = *patch.Health
+		}
+		if len(patch.Params) > 0 {
+			if err := m.mergeParamsInto(p, patch.Params); err != nil {
+				return err
+			}
+		}
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		st.Changes = append(st.Changes, newChange(id, "patch", actor, patchDiff(patch), "差量修改插件配置"))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	m.syncManifestMeta(id)
+	return m.Get(id)
+}
+
+func (m *Manager) Replace(id string, full Full, actor string) (View, error) {
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		if err := checkRevision(p, full.ExpectedRevision); err != nil {
+			return err
+		}
+		if strings.TrimSpace(full.Name) == "" {
+			return fmt.Errorf("%w: 名称不能为空", ErrInvalidParams)
+		}
+		types, err := normalizeFileTypes(full.FileTypes)
+		if err != nil {
+			return err
+		}
+		if err := validateHealth(full.Health); err != nil {
+			return err
+		}
+		p.Name = strings.TrimSpace(full.Name)
+		p.Description = strings.TrimSpace(full.Description)
+		p.Enabled = full.Enabled
+		p.Priority = full.Priority
+		p.FileTypes = types
+		p.Health = full.Health
+		if !p.Enabled {
+			p.Status = store.StatusDisabled
+		}
+		if err := m.mergeParamsInto(p, full.Params); err != nil {
+			return err
+		}
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		st.Changes = append(st.Changes, newChange(id, "replace", actor, nil, "全量替换插件配置"))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	m.syncManifestMeta(id)
+	return m.Get(id)
+}
+
+func (m *Manager) SetParams(id string, params map[string]string, actor string) (View, error) {
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		if err := m.mergeParamsInto(p, params); err != nil {
+			return err
+		}
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		st.Changes = append(st.Changes, newChange(id, "params", actor, keysOf(params), fmt.Sprintf("更新 %d 个参数", len(params))))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	return m.Get(id)
+}
+
+// mergeParamsInto 合并参数并做加密、校验；调用方必须持有存储写锁。
+func (m *Manager) mergeParamsInto(p *store.Plugin, patch map[string]string) error {
+	dir := m.dirOf(p)
+	mf, err := LoadManifest(dir)
+	if err != nil {
+		return err
+	}
+	merged := mergeParams(p.Params, patch)
+	sealed, err := SealParams(mf, merged, m.seal)
+	if err != nil {
+		return err
+	}
+	plain := mustPlain(sealed, m.open)
+	if err := ValidateParams(mf, plain); err != nil {
+		return err
+	}
+	p.Params = sealed
+	return nil
+}
+
+type UpdateSpec struct {
+	Version        string `json:"version"`
+	SyncParams     bool   `json:"syncParams"`
+	ResetToDefault bool   `json:"resetToDefault"`
+	Note           string `json:"note"`
+}
+
+// Update 同步清单中的版本与新增参数。
+func (m *Manager) Update(id string, spec UpdateSpec, actor string) (View, error) {
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		dir := m.dirOf(p)
+		mf, err := LoadManifest(dir)
+		if err != nil {
+			return err
+		}
+		if spec.Version != "" {
+			mf.Version = spec.Version
+			if err := SaveManifest(dir, mf); err != nil {
+				return err
+			}
+		}
+		p.Version = mf.Version
+		if spec.ResetToDefault {
+			p.Params = DefaultParams(mf)
+		} else if spec.SyncParams {
+			for _, f := range mf.Params {
+				if _, ok := p.Params[f.Key]; !ok && f.Default != "" {
+					if p.Params == nil {
+						p.Params = map[string]string{}
+					}
+					p.Params[f.Key] = f.Default
+				}
+			}
+		}
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		st.Changes = append(st.Changes, newChange(id, "update", actor, nil, pick(spec.Note, "更新插件版本")))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	return m.Get(id)
+}
+
+func (m *Manager) Toggle(id string, enabled bool, actor string) (View, error) {
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		p.Enabled = enabled
+		if enabled {
+			if p.Status == store.StatusDisabled {
+				p.Status = store.StatusUnknown
+			}
+			p.StatusMessage = "已启用，等待健康检测"
+		} else {
+			p.Status = store.StatusDisabled
+			p.StatusMessage = "已停用"
+		}
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		action := "disable"
+		if enabled {
+			action = "enable"
+		}
+		st.Changes = append(st.Changes, newChange(id, action, actor, nil, "切换插件状态"))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	return m.Get(id)
+}
+
+func (m *Manager) SetHealth(id string, h store.HealthConfig, actor string) (View, error) {
+	if err := validateHealth(h); err != nil {
+		return View{}, err
+	}
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		p.Health = h
+		p.Revision++
+		p.UpdatedAt = store.NowUTC()
+		st.Changes = append(st.Changes, newChange(id, "health-config", actor, nil, "更新健康检测配置"))
+		return nil
+	})
+	if err != nil {
+		return View{}, err
+	}
+	return m.Get(id)
+}
+
+func (m *Manager) AckAlert(id, actor string) error {
+	return m.st.Update(func(st *store.State) error {
+		for i := range st.Alerts {
+			if st.Alerts[i].ID == id {
+				if st.Alerts[i].AckedAt != nil {
+					return nil
+				}
+				now := store.NowUTC()
+				st.Alerts[i].AckedAt = &now
+				st.Alerts[i].AckedBy = actor
+				return nil
+			}
+		}
+		return errors.New("告警不存在")
+	})
+}
+
+// Delete 删除自定义插件及其文件夹；内置插件只能停用。
+func (m *Manager) Delete(id, actor string) error {
+	var dir string
+	err := m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return ErrPluginNotFound
+		}
+		if !p.Custom {
+			return fmt.Errorf("%w: 内置插件只能停用", ErrSourceInvalid)
+		}
+		dir = m.dirOf(p)
+		st.Plugins = removePlugin(st.Plugins, id)
+		st.Alerts = removeAlerts(st.Alerts, id)
+		st.Changes = append(st.Changes, newChange(id, "delete", actor, nil, "删除自定义插件"))
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if m.rt != nil {
+		m.rt.Drop(id)
+	}
+	if dir != "" {
+		_ = os.RemoveAll(dir)
+	}
+	return nil
+}
+
+// ---------- 选择与调度 ----------
+
+func (m *Manager) Select(preferred string, category store.FileCategory) (string, error) {
+	var chosen string
+	var reason string
+	err := m.st.View(func(st *store.State) error {
+		if preferred != "" {
+			p := store.PluginByID(st, preferred)
+			if p == nil {
+				return fmt.Errorf("%w: %s", ErrPluginNotFound, preferred)
+			}
+			if !p.Enabled {
+				return fmt.Errorf("%w: %s", ErrPluginDisabled, preferred)
+			}
+			if !p.Supports(category) {
+				return fmt.Errorf("%w: %s 不承接 %s", ErrFileTypeUnsupported, preferred, category)
+			}
+			chosen = p.ID
+			return nil
+		}
+		var best *store.Plugin
+		for i := range st.Plugins {
+			p := &st.Plugins[i]
+			if !p.Enabled || !p.Supports(category) {
+				continue
+			}
+			if p.Status == store.StatusUnhealthy {
+				continue
+			}
+			if best == nil || p.Priority > best.Priority ||
+				(p.Priority == best.Priority && healthRank(p.Status) > healthRank(best.Status)) {
+				best = p
+			}
+		}
+		if best == nil {
+			reason = "没有可用的插件承接 " + string(category)
+			return ErrNoPlugin
+		}
+		chosen = best.ID
+		return nil
+	})
+	if err != nil {
+		if reason != "" {
+			return "", errors.New(reason)
+		}
+		return "", err
+	}
+	return chosen, nil
+}
+
+var ErrNoPlugin = errors.New("没有可用插件")
+
+func (m *Manager) Eligible(category store.FileCategory) []string {
+	var out []string
+	_ = m.st.View(func(st *store.State) error {
+		for _, p := range st.Plugins {
+			if p.Enabled && p.Supports(category) {
+				out = append(out, p.ID)
+			}
+		}
+		return nil
+	})
+	sort.Strings(out)
+	return out
+}
+
+// ---------- 辅助 ----------
+
+// buildIfMissing 在二进制缺失时编译，给足 2 分钟预算并复用同一份 GOCACHE。
+func (m *Manager) buildIfMissing(ctx context.Context, id, dir string) error {
+	if m.builtExists(dir) {
+		return nil
+	}
+	buildCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	return m.rt.EnsureBuilt(buildCtx, id, dir)
+}
+
+func (m *Manager) builtExists(dir string) bool {
+	fi, err := os.Stat(runtime.BinaryPath(dir))
+	return err == nil && fi.Size() > 0
+}
+
+func (m *Manager) setBuildState(id string, res *runtime.BuildResult, err error) {
+	_ = m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return nil
+		}
+		now := store.NowUTC()
+		if err != nil {
+			p.BuildError = truncateMsg(err.Error(), 500)
+			if p.Status != store.StatusDisabled {
+				p.Status = store.StatusUnhealthy
+				p.StatusMessage = "构建失败：" + truncateMsg(err.Error(), 200)
+			}
+		} else {
+			p.BuildError = ""
+			p.BuiltAt = &now
+			p.BuildSHA = res.SHA256
+			if p.Status == store.StatusUnhealthy {
+				p.Status = store.StatusUnknown
+				p.StatusMessage = "构建成功，等待健康检测"
+			}
+		}
+		p.UpdatedAt = now
+		return nil
+	})
+}
+
+// syncManifestMeta 把后台修改的名称/描述/优先级写回 plugin.json，保持单一事实来源。
+func (m *Manager) syncManifestMeta(id string) {
+	_ = m.st.Update(func(st *store.State) error {
+		p := store.PluginByID(st, id)
+		if p == nil {
+			return nil
+		}
+		dir := m.dirOf(p)
+		mf, err := LoadManifest(dir)
+		if err != nil {
+			return nil
+		}
+		mf.Name, mf.Description, mf.Priority = p.Name, p.Description, p.Priority
+		_ = SaveManifest(dir, mf)
+		return nil
+	})
+}
+
 func (m *Manager) raiseAlert(st *store.State, p *store.Plugin, mf Manifest, reason string) {
 	for i := range st.Alerts {
 		a := &st.Alerts[i]
 		if a.PluginID == p.ID && a.AckedAt == nil && a.Level == "critical" {
 			a.Message = truncateMsg(reason, 500)
 			a.CreatedAt = store.NowUTC()
-			return // 同一插件的未处理告警只保留一条，避免刷屏
+			return
 		}
 	}
-	var warn string
-	if plain, err := OpenParams(p.Params, m.open); err == nil {
-		warn = VolatileWarning(mf, plain)
-	}
-	msg := reason
-	if warn != "" {
-		msg = warn + " | " + msg
-	}
-	st.Alerts = append([]store.Alert{{
-		ID: "alt_" + randomHex(8), PluginID: p.ID, PluginName: p.Name,
-		Level: "critical", Title: "插件异常：" + p.Name,
-		Message: truncateMsg(msg, 500), CreatedAt: store.NowUTC(),
-	}}, st.Alerts...)
+	st.Alerts = append(st.Alerts, store.Alert{
+		ID: randomHex(8), PluginID: p.ID, PluginName: p.Name, Level: "critical",
+		Message: truncateMsg(reason, 500), CreatedAt: store.NowUTC(),
+	})
 }
 
 func (m *Manager) ackAlerts(st *store.State, pluginID, by string) {
@@ -623,180 +1023,47 @@ func (m *Manager) ackAlerts(st *store.State, pluginID, by string) {
 	}
 }
 
-// Upload 走指定插件完成一次上传，并联动健康状态。
-func (m *Manager) Upload(ctx context.Context, id string, req UploadRequest) (*UploadResult, error) {
-	_, mf, up, cfg, err := m.loadRunnable(id)
-	if err != nil {
-		return nil, err
-	}
-	if err := ValidateParams(mf, cfg); err != nil {
-		return nil, err
-	}
-	result, err := up.Upload(ctx, req, cfg)
-	if err != nil {
-		_ = m.st.Update(func(st *store.State) error {
-			if p := store.PluginByID(st, id); p != nil {
-				p.FailCount++
-				p.Status = store.StatusDegraded
-				p.StatusMessage = truncateMsg("上传失败: "+err.Error(), 300)
-				if p.FailCount >= 2 {
-					p.Status = store.StatusUnhealthy
-					m.raiseAlert(st, p, mf, err.Error())
-				}
-			}
-			return nil
-		})
-		return nil, fmt.Errorf("插件 %s 上传失败: %w", id, err)
-	}
-	_ = m.st.Update(func(st *store.State) error {
-		if p := store.PluginByID(st, id); p != nil {
-			now := store.NowUTC()
-			p.SuccessCount++
-			p.LastSuccessAt = &now
-			p.LastCheckedAt = &now
-			p.FailCount = 0
-			if p.Status != store.StatusDisabled {
-				p.Status = store.StatusHealthy
-				p.StatusMessage = "上传成功"
-			}
-		}
-		return nil
-	})
-	return result, nil
-}
-
-// Select 为某类文件挑选插件：权重（Priority）高者优先，同权重时健康者优先。
-// 优先排除已判定异常（unhealthy）的插件；若没有可用者再降级到全部已启用插件，
-// 避免「唯一插件被标记异常」导致上传统统失败。
-func (m *Manager) Select(preferred string, category store.FileCategory) (string, error) {
-	var id string
-	var fallback string
-	fallbackPriority := 0
-	err := m.st.View(func(st *store.State) error {
-		if preferred != "" {
-			p := store.PluginByID(st, preferred)
-			if p == nil {
-				return ErrPluginNotFound
-			}
-			if !p.Enabled {
-				return ErrPluginDisabled
-			}
-			if !p.Supports(category) {
-				return fmt.Errorf("%w：插件 %s 只承接 %s，当前文件是 %s",
-					ErrFileTypeUnsupported, p.Name,
-					strings.Join(FileTypeStrings(p.FileTypes), "/"), category)
-			}
-			id = p.ID
-			return nil
-		}
-		bestPriority, bestRank := -1, -1
-		for i := range st.Plugins {
-			p := &st.Plugins[i]
-			if !p.Enabled || !p.Supports(category) {
-				continue
-			}
-			if p.Status == store.StatusUnhealthy {
-				if fallback == "" || p.Priority > fallbackPriority {
-					fallback, fallbackPriority = p.ID, p.Priority
-				}
-				continue
-			}
-			rank := healthRank(p.Status)
-			if p.Priority > bestPriority || (p.Priority == bestPriority && rank > bestRank) {
-				bestPriority, bestRank, id = p.Priority, rank, p.ID
-			}
-		}
-		if id == "" {
-			id = fallback
-		}
-		return nil
-	})
-	if err != nil {
-		return "", err
-	}
-	if id == "" {
-		return "", fmt.Errorf("没有可用的上传插件（文件类型：%s），请在插件管理中启用插件或调整其支持的文件类型", category)
-	}
-	return id, nil
-}
-
-// Eligible 返回能承接该类文件的已启用插件 ID，供上传测试页与 MCP 预检使用。
-func (m *Manager) Eligible(category store.FileCategory) []string {
-	out := []string{}
-	_ = m.st.View(func(st *store.State) error {
-		for i := range st.Plugins {
-			p := &st.Plugins[i]
-			if p.Enabled && p.Supports(category) && p.Status != store.StatusUnhealthy {
-				out = append(out, p.ID)
-			}
-		}
-		return nil
-	})
-	sort.SliceStable(out, func(i, j int) bool { return out[i] < out[j] })
-	return out
-}
-
-// healthRank 把健康状态映射为同权重下的比较值：越健康越大。
 func healthRank(s store.PluginStatus) int {
 	switch s {
 	case store.StatusHealthy:
-		return 3
+		return 4
 	case store.StatusUnknown:
-		return 2
+		return 3
 	case store.StatusDegraded:
+		return 2
+	case store.StatusDisabled:
 		return 1
 	default:
 		return 0
 	}
 }
 
-func (m *Manager) SetHealth(id string, h store.HealthConfig, actor string) (View, error) {
-	return m.Patch(id, Patch{Health: &h}, actor)
-}
-
-func (m *Manager) AckAlert(id, actor string) error {
-	return m.st.Update(func(st *store.State) error {
-		a := store.AlertByID(st, id)
-		if a == nil {
-			return errors.New("告警不存在")
-		}
-		now := store.NowUTC()
-		a.AckedAt = &now
-		a.AckedBy = actor
-		return nil
-	})
-}
-
-// ---------- helpers ----------
-
-// normalizeFileTypes 校验并去重，顺序统一按 store.AllCategories，避免
-// 不同入口写入的顺序不一致导致 diff 抖动。
 func normalizeFileTypes(in []store.FileCategory) ([]store.FileCategory, error) {
-	raw := make([]string, 0, len(in))
+	if len(in) == 0 {
+		return nil, nil
+	}
+	seen := map[store.FileCategory]bool{}
+	out := make([]store.FileCategory, 0, len(in))
 	for _, c := range in {
-		raw = append(raw, string(c))
-	}
-	return ParseFileTypes(raw)
-}
-
-func sameFileTypes(a, b []store.FileCategory) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
+		if !store.ValidCategory(c) {
+			return nil, fmt.Errorf("%w: 未知文件类型 %s", ErrInvalidParams, c)
 		}
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		out = append(out, c)
 	}
-	return true
+	return out, nil
 }
 
 func mergeParams(base, patch map[string]string) map[string]string {
-	out := make(map[string]string, len(base)+len(patch))
-	for k, v := range base {
-		out[k] = v
-	}
+	out := copyMap(base)
 	for k, v := range patch {
+		if strings.TrimSpace(v) == "" {
+			delete(out, k)
+			continue
+		}
 		out[k] = v
 	}
 	return out
@@ -812,36 +1079,32 @@ func copyMap(in map[string]string) map[string]string {
 
 func checkRevision(p *store.Plugin, expected *int64) error {
 	if expected != nil && *expected != p.Revision {
-		return fmt.Errorf("版本冲突：当前 revision=%d，提交的是 %d（请刷新后重试）", p.Revision, *expected)
+		return fmt.Errorf("版本冲突：当前 revision=%d，请刷新后重试", p.Revision)
 	}
 	return nil
 }
 
 func validateHealth(h store.HealthConfig) error {
 	if h.IntervalSecs < 10 {
-		return errors.New("检测间隔不得小于 10 秒")
+		return fmt.Errorf("%w: 检测间隔不能小于 10 秒", ErrInvalidParams)
 	}
 	if h.TimeoutSecs < 1 || h.TimeoutSecs > 120 {
-		return errors.New("检测超时需在 1~120 秒之间")
+		return fmt.Errorf("%w: 超时必须在 1-120 秒", ErrInvalidParams)
 	}
-	if h.FailThreshold < 1 {
-		return errors.New("失败阈值至少为 1")
-	}
-	if h.ProbeMode != "" && h.ProbeMode != "ping" && h.ProbeMode != "upload-sample" {
-		return errors.New("探活模式仅支持 ping / upload-sample")
+	if h.FailThreshold < 1 || h.FailThreshold > 20 {
+		return fmt.Errorf("%w: 失败阈值必须在 1-20", ErrInvalidParams)
 	}
 	return nil
 }
 
 func newChange(pluginID, action, actor string, diff map[string]string, msg string) store.ChangeLog {
 	return store.ChangeLog{
-		ID: "chg_" + randomHex(8), PluginID: pluginID, Action: action,
-		Actor: actor, Diff: diff, Message: msg, CreatedAt: store.NowUTC(),
+		ID: randomHex(8), PluginID: pluginID, Action: action, Actor: actor,
+		Diff: diff, Message: truncateMsg(msg, 500), CreatedAt: store.NowUTC(),
 	}
 }
 
 func truncateMsg(s string, n int) string {
-	s = strings.ReplaceAll(s, "\n", " ")
 	if len(s) <= n {
 		return s
 	}
@@ -849,17 +1112,113 @@ func truncateMsg(s string, n int) string {
 }
 
 func randomHex(n int) string {
-	b := make([]byte, (n+1)/2)
-	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%d", time.Now().UnixNano())
-	}
-	const hexChars = "0123456789abcdef"
-	out := make([]byte, n)
+	const hexdigits = "0123456789abcdef"
+	b := make([]byte, n*2)
+	seed := time.Now().UnixNano()
 	for i := range b {
-		out[i*2] = hexChars[b[i]>>4]
-		if i*2+1 < n {
-			out[i*2+1] = hexChars[b[i]&0x0f]
+		seed = seed*6364136223846793005 + 1442695040888963407
+		b[i] = hexdigits[byte(seed>>56)%16]
+	}
+	return string(b)
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+func convertOutput(out *sdk.Output, req UploadRequest, id string) *UploadResult {
+	res := &UploadResult{Provider: id}
+	if out != nil {
+		res.URL, res.ObjectKey = out.URL, out.ObjectKey
+		res.FileName, res.MimeType = out.FileName, out.MimeType
+		res.FileSize, res.URLExpireAt, res.Extra = out.FileSize, out.URLExpireAt, out.Extra
+	}
+	if res.FileName == "" {
+		res.FileName = req.FileName
+	}
+	if res.MimeType == "" {
+		res.MimeType = req.MimeType
+	}
+	if res.FileSize <= 0 {
+		res.FileSize = req.Size
+	}
+	if res.ObjectKey == "" {
+		res.ObjectKey = req.ObjectKey
+	}
+	return res
+}
+
+func convertTraces(in []sdk.Trace) []Trace {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Trace, 0, len(in))
+	for _, t := range in {
+		out = append(out, Trace{
+			At: t.At, Method: t.Method, URL: t.URL, Status: t.Status,
+			DurationMs: t.DurationMs, ReqBytes: t.ReqBytes, RespBytes: t.RespBytes,
+			ReqHeaders: t.ReqHeaders, RespHeaders: t.RespHeaders,
+			Snippet: t.Snippet, Error: t.Error,
+		})
+	}
+	return out
+}
+
+func newCallID() string { return "c" + randomHex(6) }
+
+func shortLog(res *runtime.BuildResult) string {
+	if res == nil {
+		return ""
+	}
+	return truncateMsg(res.Output, 300)
+}
+
+func patchDiff(p Patch) map[string]string {
+	out := map[string]string{}
+	if p.Name != nil {
+		out["name"] = *p.Name
+	}
+	if p.Priority != nil {
+		out["priority"] = fmt.Sprint(*p.Priority)
+	}
+	if p.Enabled != nil {
+		out["enabled"] = fmt.Sprint(*p.Enabled)
+	}
+	if p.FileTypes != nil {
+		out["fileTypes"] = fmt.Sprint(*p.FileTypes)
+	}
+	return out
+}
+
+func keysOf(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k := range m {
+		out[k] = "updated"
+	}
+	return out
+}
+
+func pick(a, b string) string {
+	if strings.TrimSpace(a) != "" {
+		return a
+	}
+	return b
+}
+
+func removePlugin(list []store.Plugin, id string) []store.Plugin {
+	out := list[:0]
+	for _, p := range list {
+		if p.ID != id {
+			out = append(out, p)
 		}
 	}
-	return string(out)
+	return out
+}
+
+func removeAlerts(list []store.Alert, id string) []store.Alert {
+	out := list[:0]
+	for _, a := range list {
+		if a.PluginID != id {
+			out = append(out, a)
+		}
+	}
+	return out
 }

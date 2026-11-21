@@ -1,0 +1,246 @@
+// WorkBuddy 开放上传插件（Go 插件源码）。
+//
+// 上游协议：POST {base_url}/v2/backgroundagent/localProxy/upload
+// multipart/form-data，携带 Authorization / x-user-id / x-client-* 等头；
+// 返回 {"code":0,"data":{"success":true,"url":...,"objectKey":...,"fileInfo":{...}}}
+//
+// 这是一个完整的 Go 程序：你可以随意修改请求方式（PUT、多次请求、
+// 自定义签名与加密），保存后服务端会自动重新编译并热切换。
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/Mr-losfer/s3bridge/sdk"
+)
+
+type plugin struct{}
+
+type upstreamResponse struct {
+	Code      int    `json:"code"`
+	Msg       string `json:"msg"`
+	RequestID string `json:"requestId"`
+	Data      struct {
+		Success   bool   `json:"success"`
+		URL       string `json:"url"`
+		ObjectKey string `json:"objectKey"`
+		FileInfo  struct {
+			FileName string `json:"fileName"`
+			FileSize int64  `json:"fileSize"`
+			MimeType string `json:"mimeType"`
+		} `json:"fileInfo"`
+	} `json:"data"`
+}
+
+// Upload 使用流式 multipart 转发文件，避免大文件整体读入内存。
+func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
+	endpoint, err := joinURL(cfg["base_url"], cfg["upload_path"])
+	if err != nil {
+		return nil, err
+	}
+	if max := parseInt64(cfg["max_file_bytes"], 0); max > 0 && in.Size > max {
+		return nil, fmt.Errorf("文件 %d 字节超过插件上限 %d 字节", in.Size, max)
+	}
+	f, err := os.Open(in.Path)
+	if err != nil {
+		return nil, fmt.Errorf("打开文件: %w", err)
+	}
+	defer f.Close()
+
+	timeout := time.Duration(parseInt64(cfg["timeout_secs"], 30)) * time.Second
+	client := sdk.NewClient(timeout)
+
+	body, contentType := sdk.MultipartStream(fieldName(cfg["file_field"]), in.FileName, in.MimeType, f, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, fmt.Errorf("构造上游请求: %w", err)
+	}
+	req.Header.Set("Content-Type", contentType)
+	applyHeaders(req, cfg)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("调用 WorkBuddy 上传接口: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, fmt.Errorf("读取上游响应: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("上游 HTTP %d: %s", resp.StatusCode, truncate(string(raw), 300))
+	}
+
+	var out upstreamResponse
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("响应不是合法 JSON: %v", err)
+	}
+	if out.Code != 0 || !out.Data.Success || out.Data.URL == "" {
+		return nil, fmt.Errorf("上游返回异常: code=%d msg=%s", out.Code, out.Msg)
+	}
+
+	fileName := out.Data.FileInfo.FileName
+	if fileName == "" {
+		fileName = in.FileName
+	}
+	mimeType := out.Data.FileInfo.MimeType
+	if mimeType == "" {
+		mimeType = in.MimeType
+	}
+	size := out.Data.FileInfo.FileSize
+	if size <= 0 {
+		size = in.Size
+	}
+	return &sdk.Output{
+		URL: out.Data.URL, ObjectKey: out.Data.ObjectKey,
+		FileName: fileName, MimeType: mimeType, FileSize: size,
+		URLExpireAt: signExpiry(out.Data.URL),
+		Extra: map[string]any{
+			"requestId": out.RequestID, "remoteKey": out.Data.ObjectKey,
+			"httpStatus": resp.StatusCode,
+		},
+	}, nil
+}
+
+// Check 做无副作用探活：校验凭据有效期 + 到上游域名发一次轻量 GET。
+// 刻意不上传样例文件，避免在第三方产生垃圾对象。
+func (plugin) Check(ctx context.Context, cfg sdk.Config) error {
+	if strings.TrimSpace(cfg["token_expires_at"]) != "" {
+		if t, err := parseTime(cfg["token_expires_at"]); err == nil && time.Now().After(t) {
+			return errors.New("Bearer Token 已过期，请更新")
+		}
+	}
+	base := strings.TrimSpace(cfg["base_url"])
+	if base == "" {
+		return errors.New("未配置服务域名")
+	}
+	client := sdk.NewClient(8 * time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base, nil)
+	if err != nil {
+		return err
+	}
+	applyHeaders(req, cfg)
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("上游不可达: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode >= 500 {
+		return fmt.Errorf("上游返回 %d，服务异常", resp.StatusCode)
+	}
+	return nil
+}
+
+func applyHeaders(r *http.Request, cfg sdk.Config) {
+	set := func(k, v string) {
+		if strings.TrimSpace(v) != "" {
+			r.Header.Set(k, v)
+		}
+	}
+	auth := strings.TrimSpace(cfg["authorization"])
+	if auth != "" && !strings.HasPrefix(strings.ToLower(auth), "bearer ") {
+		auth = "Bearer " + auth
+	}
+	set("Authorization", auth)
+	set("X-User-Id", cfg["x_user_id"])
+	set("Cookie", cfg["cookie"])
+	set("X-Client-Version", cfg["x_client_version"])
+	set("X-Client-Product", cfg["x_client_product"])
+	set("X-Client-Platform", cfg["x_client_platform"])
+	set("User-Agent", cfg["user_agent"])
+	r.Header.Set("X-Client-Request-Id", "c_"+sdk.RandHex(6))
+}
+
+func joinURL(base, path string) (string, error) {
+	base = strings.TrimRight(strings.TrimSpace(base), "/")
+	if base == "" {
+		return "", errors.New("服务域名为空")
+	}
+	u, err := url.Parse(base)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return "", fmt.Errorf("服务域名非法: %q", base)
+	}
+	if path == "" {
+		path = "/v2/backgroundagent/localProxy/upload"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path, nil
+}
+
+func fieldName(v string) string {
+	if strings.TrimSpace(v) == "" {
+		return "file"
+	}
+	return v
+}
+
+// signExpiry 从 COS 签名 URL 的 q-sign-time=start;end 中解析到期时间。
+func signExpiry(raw string) *time.Time {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil
+	}
+	v := u.Query().Get("q-sign-time")
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ";")
+	if len(parts) != 2 {
+		return nil
+	}
+	end, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || end <= 0 {
+		return nil
+	}
+	t := time.Unix(end, 0).UTC()
+	return &t
+}
+
+func parseTime(v string) (time.Time, error) {
+	v = strings.TrimSpace(v)
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n > 1e12 {
+			return time.UnixMilli(n), nil
+		}
+		return time.Unix(n, 0), nil
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05", "2006-01-02T15:04", "2006-01-02"} {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("无法解析时间 %q", v)
+}
+
+func parseInt64(v string, def int64) int64 {
+	if strings.TrimSpace(v) == "" {
+		return def
+	}
+	if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+		return n
+	}
+	return def
+}
+
+func truncate(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
+}
+
+func main() { sdk.Serve(plugin{}) }

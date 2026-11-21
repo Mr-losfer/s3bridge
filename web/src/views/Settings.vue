@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2 } from 'lucide-vue-next'
+import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2, Images } from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { can } from '../session'
@@ -40,6 +40,9 @@ async function load() {
       siteName: s?.siteName || '', defaultPlugin: s?.defaultPlugin || '',
       healthEnabled: !!s?.healthEnabled, healthIntervalSecs: s?.healthIntervalSecs || 300,
       alertOnFailure: !!s?.alertOnFailure, announcement: s?.announcement || '',
+      imageValidityEnabled: s?.imageValidityEnabled !== false,
+      imageValidityIntervalHours: s?.imageValidityIntervalHours || 72,
+      imageValidityFailThreshold: s?.imageValidityFailThreshold || 2,
     }
   } catch (e) { notifyError(e, '加载系统设置失败') }
   finally { loading.value = false }
@@ -56,10 +59,13 @@ async function save() {
         healthEnabled: form.value.healthEnabled,
         healthIntervalSecs: Number(form.value.healthIntervalSecs),
         alertOnFailure: form.value.alertOnFailure, announcement: form.value.announcement,
+        imageValidityEnabled: form.value.imageValidityEnabled,
+        imageValidityIntervalHours: Number(form.value.imageValidityIntervalHours),
+        imageValidityFailThreshold: Number(form.value.imageValidityFailThreshold),
       },
     })
     settings.value = r
-    notify('系统设置已保存，健康检测调度器已重建', { title: '保存成功' })
+    notify('系统设置已保存，健康检测与图片巡检调度已生效', { title: '保存成功' })
     await load()
   } catch (e) { notifyError(e, '保存失败') } finally { saving.value = false }
 }
@@ -80,7 +86,7 @@ async function changePassword() {
   <div>
     <PageHeader
       title="系统设置"
-      description="站点标识、默认插件、健康检测总开关与告警策略。修改检测开关会立即重建调度器。"
+      description="站点标识、默认插件、健康检测与图片有效性巡检策略。修改后立即生效，无需重启。"
     >
       <template #actions>
         <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
@@ -133,6 +139,33 @@ async function changePassword() {
               </div>
               <Switch v-model="form.alertOnFailure" :disabled="!canManage" class="mt-0.5 shrink-0" />
             </div>
+          </div>
+        </div>
+
+        <div class="mt-5 border-t pt-4">
+          <div class="flex items-center gap-2">
+            <Images class="size-4 text-muted-foreground" />
+            <p class="text-[13px] font-semibold">图片有效性巡检</p>
+          </div>
+          <p class="mt-0.5 text-[11.5px] leading-relaxed text-muted-foreground">
+            只针对本站归档的图片：按周期向本机回环发 HEAD（不支持时退回带 Range 的 GET），
+            判定 200 且返回 <code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">image/*</code> 即为正常，
+            <strong class="text-foreground">不会下载正文</strong>。连续失败达到阈值才标记失效并生成告警。
+          </p>
+          <div class="mt-3 grid gap-3 sm:grid-cols-3">
+            <div class="flex items-start justify-between gap-3 rounded-lg border px-3 py-3">
+              <div>
+                <p class="text-[12px] font-medium">启用巡检</p>
+                <p class="mt-0.5 text-[11px] text-muted-foreground">关闭后不再检查任何图片</p>
+              </div>
+              <Switch v-model="form.imageValidityEnabled" :disabled="!canManage" class="mt-0.5 shrink-0" />
+            </div>
+            <Field label="巡检间隔（小时）" hint="默认 72 小时（3 天）；插件清单可单独覆盖">
+              <Input v-model.number="form.imageValidityIntervalHours" type="number" min="1" max="720" :disabled="!canManage" />
+            </Field>
+            <Field label="失败阈值（次）" hint="连续失败达到该次数才判定失效，避免单次抖动误报">
+              <Input v-model.number="form.imageValidityFailThreshold" type="number" min="1" max="10" :disabled="!canManage" />
+            </Field>
           </div>
         </div>
 

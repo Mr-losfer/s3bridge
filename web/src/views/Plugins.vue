@@ -42,11 +42,18 @@ const filtered = computed(() => {
 
 const createOpen = ref(false)
 const creating = ref(false)
-const createForm = ref({ kind: '', name: '', version: '', description: '', template: '', enabled: true, priority: 100, fileTypes: [] })
+const templates = ref([])
+const createForm = ref({ id: '', name: '', version: '', description: '', template: 'blank', enabled: true, priority: 100, fileTypes: [] })
 
-function openCreate() {
-  createForm.value = { kind: '', name: '', version: '', description: '', template: '', enabled: true, priority: 100, fileTypes: [] }
+async function openCreate() {
+  createForm.value = { id: '', name: '', version: '', description: '', template: 'blank', enabled: true, priority: 100, fileTypes: [] }
   createOpen.value = true
+  if (!templates.value.length) {
+    try {
+      const r = await api('/plugins/registry')
+      templates.value = r.registry || []
+    } catch { /* 模板拉取失败时仍可选空白骨架 */ }
+  }
 }
 function toggleCreateType(key) {
   const list = createForm.value.fileTypes
@@ -55,15 +62,19 @@ function toggleCreateType(key) {
   else list.push(key)
 }
 async function submitCreate() {
-  const kind = createForm.value.kind.trim().toLowerCase()
-  if (!/^[a-z][a-z0-9_-]{1,63}$/.test(kind)) { notifyError(new Error('插件 ID 需小写字母开头，仅含小写字母/数字/下划线/连字符')); return }
+  const id = createForm.value.id.trim().toLowerCase()
+  if (!/^[a-z][a-z0-9][a-z0-9_-]{0,38}$/.test(id)) {
+    notifyError(new Error('插件 ID 需小写字母开头，2-40 位，仅含小写字母/数字/下划线/连字符'))
+    return
+  }
   creating.value = true
   try {
-    const r = await api('/plugins', { method: 'POST', body: { ...createForm.value, kind, priority: Number(createForm.value.priority) || 0 } })
-    notify('插件已创建，去详情页编写源码即可生效', { title: kind })
+    const body = { ...createForm.value, id, priority: Number(createForm.value.priority) || 0, fileTypes: createForm.value.fileTypes }
+    const r = await api('/plugins', { method: 'POST', body })
+    notify('插件已创建并编译完成，去详情页继续写源码', { title: id })
     createOpen.value = false
     await load()
-    go('plugin', r.created || kind)
+    go('plugin', r.created || id)
   } catch (e) { notifyError(e, '创建插件失败') } finally { creating.value = false }
 }
 
@@ -310,17 +321,17 @@ async function saveHealth() {
     </Card>
 
     <!-- 创建插件 -->
-    <Sheet v-model:open="createOpen" title="创建上传插件" description="创建一个声明式插件实例，随后在详情页编写请求模板与响应映射，即时生效、无需重启。" class="max-w-2xl">
+    <Sheet v-model:open="createOpen" title="创建 Go 插件" description="生成一个插件文件夹（plugin.json + main.go）并立即编译。之后可在详情页直接编辑 Go 源码，保存即生效。" class="max-w-2xl">
       <div class="grid gap-4 sm:grid-cols-2">
-        <Field label="插件 ID" required hint="全局唯一，小写字母开头，仅含小写字母/数字/下划线/连字符">
-          <Input v-model="createForm.kind" placeholder="例如 my-uploader" />
+        <Field label="插件 ID" required hint="全局唯一，小写字母开头，2-40 位，仅含小写字母/数字/下划线/连字符">
+          <Input v-model="createForm.id" placeholder="例如 my-uploader" />
         </Field>
         <Field label="显示名称"><Input v-model="createForm.name" placeholder="留空则使用插件 ID" /></Field>
         <Field label="版本号"><Input v-model="createForm.version" placeholder="1.0.0" /></Field>
-        <Field label="起始模板" hint="选择现有插件会导出其等价声明式源码作为起点">
+        <Field label="起始模板" hint="模板决定 main.go 的初始实现，之后可以随意改写">
           <Select v-model="createForm.template">
-            <option value="">空白骨架（可运行示例）</option>
-            <option v-for="p in plugins" :key="p.id" :value="p.id">{{ p.name }} · {{ p.id }}</option>
+            <option value="blank">空白骨架（从零实现任意协议）</option>
+            <option value="http-multipart">HTTP 表单上传（multipart 转发）</option>
           </Select>
         </Field>
         <Field label="说明" class="sm:col-span-2">
@@ -354,10 +365,10 @@ async function saveHealth() {
       </div>
 
       <div class="mt-5 rounded-lg border border-primary/20 bg-primary/[0.04] p-3.5 text-[11.5px] leading-relaxed text-muted-foreground">
-        创建后到插件详情页的「插件源码」区写 <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">request</code> /
-        <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">response</code> 映射，或用 MCP 的
-        <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_code_upload</code> /
-        <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_code_patch</code> 完成开发。当前已有 {{ customCount }} 个自定义插件。
+        插件是真正的 Go 程序：可以发起任意次请求、使用 PUT / 分片上传、做加解密与签名，不受模板限制。
+        创建后在详情页「插件源码」里编辑并保存即自动编译生效，也可以用 MCP 的
+        <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_file_write</code> /
+        <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_build</code> 由 Agent 全程开发。当前已有 {{ customCount }} 个自定义插件。
       </div>
 
       <template #footer>

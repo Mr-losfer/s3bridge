@@ -1,32 +1,38 @@
-// Package plugin 定义插件契约：清单(Manifest)、参数 Schema、统一上传结果，
-// 以及内置插件类型的注册表。
+// Package plugin 管理 Go 插件：文件夹布局、构建、子进程调用与实例生命周期。
 //
-// 一个「插件」= 一段把第三方上传接口转换成 S3Bridge 标准输出的适配器。
-// 参数 Schema 是单一事实来源：前端动态表单、参数校验、MCP 参数修改、
-// 插件开发文档全部由它生成，避免三处各写一遍而漂移。
+// 一个插件 = 一个文件夹：
+//
+//	{DataDir}/plugins/{id}/
+//	├── plugin.json   # 元信息、参数 Schema、调度与健康配置
+//	├── main.go       # 入口：sdk.Serve(...)
+//	└── *.go          # 任意多个源文件，可 import 整个标准库
+//
+// 源码由运行时用本机 Go 工具链编译为独立可执行文件，主服务以子进程方式调用。
+// 插件拥有完整 Go 能力：任意次 HTTP 请求、任意方法、任意加解密。
 package plugin
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"io"
 	"sort"
-	"sync"
 	"time"
 )
 
 var (
-	ErrUnknownKind    = errors.New("未注册的插件类型")
 	ErrPluginNotFound = errors.New("插件实例不存在")
 	ErrPluginDisabled = errors.New("插件已停用")
 	ErrInvalidParams  = errors.New("插件参数校验失败")
 	ErrUpstream       = errors.New("第三方接口返回异常")
 	// ErrFileTypeUnsupported 表示显式指定的插件不承接当前文件类型。
 	ErrFileTypeUnsupported = errors.New("插件不支持该文件类型")
+	ErrNoToolchain         = errors.New("未找到 Go 工具链")
+	ErrBuildFailed         = errors.New("插件编译失败")
+	ErrSourceInvalid       = errors.New("插件源码不合法")
 )
 
 // ParamField 描述一个插件配置项的渲染与校验规则。
+// 它仍然是 JSON 元数据：Go 代码负责逻辑，Schema 负责后台表单与校验。
 type ParamField struct {
 	Key          string        `json:"key"`
 	Label        string        `json:"label"`
@@ -57,21 +63,29 @@ type HealthHint struct {
 	ProbeMode     string `json:"probeMode"`
 }
 
-// Manifest 是插件的静态描述，由代码定义、启动即注册。
+// ValidityHint 控制该插件产出的图片参与有效性巡检的频率。
+// IntervalHours 为 0 表示跟随全局设置（默认 72 小时）。
+type ValidityHint struct {
+	Enabled       *bool `json:"enabled,omitempty"`
+	IntervalHours int   `json:"intervalHours,omitempty"`
+}
+
+// Manifest 是插件文件夹内 plugin.json 的内容。
 type Manifest struct {
-	Kind         string       `json:"kind"`
-	Name         string       `json:"name"`
-	Version      string       `json:"version"`
-	Description  string       `json:"description"`
-	Author       string       `json:"author"`
-	Endpoint     string       `json:"endpoint"`
-	Capabilities []string     `json:"capabilities"`
-	Params       []ParamField `json:"params"`
-	Health       HealthHint   `json:"health"`
-	Docs         string       `json:"docs"`                // 该插件的接入说明（Markdown）
-	SampleCode   string       `json:"sampleCode"`          // 插件开发文档中的示例代码
-	Source       string       `json:"source,omitempty"`    // 等价的声明式插件源码（内置插件可选提供，供 Agent 派生）
-	FileTypes    []string     `json:"fileTypes,omitempty"` // 可承接的文件类型；空表示全部
+	Schema      int          `json:"schema"` // 固定为 2
+	ID          string       `json:"id"`
+	Name        string       `json:"name"`
+	Version     string       `json:"version"`
+	Description string       `json:"description"`
+	Author      string       `json:"author"`
+	Entry       string       `json:"entry,omitempty"` // 入口文件，默认 main.go
+	FileTypes   []string     `json:"fileTypes"`       // 可承接的文件类型；空表示全部
+	Priority    int          `json:"priority"`        // 默认调度权重
+	TimeoutSecs int          `json:"timeoutSecs"`     // 单次调用超时，默认 60
+	Health      HealthHint   `json:"health"`
+	Validity    ValidityHint `json:"validity"`
+	Params      []ParamField `json:"params"`
+	Docs        string       `json:"docs,omitempty"`
 }
 
 // UploadRequest 是统一后的上传输入。
@@ -80,6 +94,7 @@ type UploadRequest struct {
 	MimeType  string
 	Size      int64
 	Reader    io.Reader
+	Path      string // 已落盘的文件路径，插件直接打开，避免进程间传大文件
 	Bucket    string
 	ObjectKey string
 	UserID    string
@@ -97,62 +112,29 @@ type UploadResult struct {
 	Extra       map[string]any `json:"extra,omitempty"`
 }
 
-// Uploader 是插件作者必须实现的两个方法。
-type Uploader interface {
-	// Upload 把请求转发给第三方并转换为 UploadResult。
-	Upload(ctx context.Context, req UploadRequest, cfg map[string]string) (*UploadResult, error)
-	// Check 做轻量探活，不应产生真实业务副作用（不上传真实文件）。
-	Check(ctx context.Context, cfg map[string]string) error
+// Trace 是插件一次出站请求的记录（调试台展示用）。
+type Trace struct {
+	At          time.Time         `json:"at"`
+	Method      string            `json:"method"`
+	URL         string            `json:"url"`
+	Status      int               `json:"status"`
+	DurationMs  float64           `json:"durationMs"`
+	ReqBytes    int64             `json:"reqBytes"`
+	RespBytes   int64             `json:"respBytes"`
+	ReqHeaders  map[string]string `json:"reqHeaders,omitempty"`
+	RespHeaders map[string]string `json:"respHeaders,omitempty"`
+	Snippet     string            `json:"snippet,omitempty"`
+	Error       string            `json:"error,omitempty"`
 }
 
-// Descriptor 把清单与构造器绑定。
-type Descriptor struct {
-	Manifest Manifest
-	New      func() Uploader
-}
-
-// Registry 并发安全地保存所有已编译进二进制的插件类型。
-type Registry struct {
-	mu    sync.RWMutex
-	items map[string]Descriptor
-}
-
-func NewRegistry() *Registry {
-	return &Registry{items: make(map[string]Descriptor)}
-}
-
-func (r *Registry) Register(d Descriptor) error {
-	if d.Manifest.Kind == "" || d.New == nil {
-		return errors.New("插件清单缺少 kind 或构造器")
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.items[d.Manifest.Kind]; exists {
-		return fmt.Errorf("插件类型 %s 重复注册", d.Manifest.Kind)
-	}
-	r.items[d.Manifest.Kind] = d
-	return nil
-}
-
-func (r *Registry) Get(kind string) (Descriptor, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	d, ok := r.items[kind]
-	if !ok {
-		return Descriptor{}, fmt.Errorf("%w: %s", ErrUnknownKind, kind)
-	}
-	return d, nil
-}
-
-func (r *Registry) List() []Manifest {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	out := make([]Manifest, 0, len(r.items))
-	for _, d := range r.items {
-		out = append(out, d.Manifest)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
-	return out
+// Template 是可从后台/MCP 派生的插件模板。
+type Template struct {
+	Kind        string            `json:"kind"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	FileTypes   []string          `json:"fileTypes"`
+	Params      []ParamField      `json:"params"`
+	Files       map[string]string `json:"files"` // 文件名 → 源码
 }
 
 // DefaultParams 提取清单中的默认值。
@@ -174,4 +156,49 @@ func FieldByKey(m Manifest, key string) (ParamField, bool) {
 		}
 	}
 	return ParamField{}, false
+}
+
+// SortedGroups 按出现顺序对参数分组，供前端渲染。
+func SortedGroups(m Manifest) []ParamGroup {
+	var order []string
+	idx := map[string]*ParamGroup{}
+	for _, f := range m.Params {
+		g := f.Group
+		if g == "" {
+			g = "通用"
+		}
+		grp := idx[g]
+		if grp == nil {
+			grp = &ParamGroup{Name: g}
+			idx[g] = grp
+			order = append(order, g)
+		}
+		grp.Fields = append(grp.Fields, f)
+	}
+	out := make([]ParamGroup, 0, len(order))
+	for _, g := range order {
+		out = append(out, *idx[g])
+	}
+	return out
+}
+
+type ParamGroup struct {
+	Name   string       `json:"name"`
+	Fields []ParamField `json:"fields"`
+}
+
+// SortManifests 按 ID 排序，保证列表稳定。
+func SortManifests(list []Manifest) {
+	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
+}
+
+// EnsureContext 在缺少 deadline 时补一个默认超时，避免子进程调用悬挂。
+func EnsureContext(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if d <= 0 {
+		d = 60 * time.Second
+	}
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+	return context.WithTimeout(ctx, d)
 }

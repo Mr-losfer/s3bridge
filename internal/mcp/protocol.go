@@ -78,9 +78,9 @@ func (s *Server) Handle(ctx context.Context, data []byte, p *auth.Principal) []b
 			},
 			"serverInfo": map[string]any{"name": "s3bridge", "version": s.version},
 			"instructions": "S3Bridge 插件化上传聚合网关。除站点/插件/用户/存储桶管理外，" +
-				"可用 plugin_create、plugin_code_get、plugin_code_upload、plugin_code_patch、" +
-				"plugin_validate、plugin_export、plugin_delete 通过声明式插件源码从零开发新插件并即时生效；" +
-				"再用 plugin_debug 与 upload_test 验证，无需重启服务。",
+				"可用 plugin_create 建插件文件夹、plugin_file_write/plugin_file_read 读写 Go 源码、" +
+				"plugin_build 编译、plugin_validate 试编译、plugin_debug 看请求追踪、" +
+				"upload_test 真实上传验证。插件是真正的 Go 程序（任意请求、PUT、加解密），保存后即时生效，无需重启服务。",
 		}
 	case "notifications/initialized", "notifications/cancelled":
 		return nil

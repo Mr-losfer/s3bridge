@@ -15,18 +15,19 @@ import (
 
 // galleryItem 是相册墙上的一个格子，只携带渲染所需字段。
 type galleryItem struct {
-	ID        string             `json:"id"`
-	Bucket    string             `json:"bucket"`
-	Key       string             `json:"objectKey"`
-	FileName  string             `json:"fileName"`
-	MimeType  string             `json:"mimeType"`
-	Size      int64              `json:"size"`
-	Category  store.FileCategory `json:"category"`
-	Width     int                `json:"width,omitempty"`
-	Height    int                `json:"height,omitempty"`
-	OwnerID   string             `json:"ownerId,omitempty"`
-	PluginID  string             `json:"pluginId,omitempty"`
-	CreatedAt time.Time          `json:"createdAt"`
+	ID        string               `json:"id"`
+	Bucket    string               `json:"bucket"`
+	Key       string               `json:"objectKey"`
+	FileName  string               `json:"fileName"`
+	MimeType  string               `json:"mimeType"`
+	Size      int64                `json:"size"`
+	Category  store.FileCategory   `json:"category"`
+	Width     int                  `json:"width,omitempty"`
+	Height    int                  `json:"height,omitempty"`
+	OwnerID   string               `json:"ownerId,omitempty"`
+	PluginID  string               `json:"pluginId,omitempty"`
+	Validity  store.ObjectValidity `json:"validity"`
+	CreatedAt time.Time            `json:"createdAt"`
 }
 
 type galleryBucket struct {
@@ -47,6 +48,7 @@ func (s *Server) gallery(c *Ctx) error {
 	bucket := c.Query("bucket", "")
 	keyword := strings.ToLower(c.Query("q", ""))
 	from, to := parseSince(c.Query("from", "")), parseSince(c.Query("to", ""))
+	validityFilter := c.Query("validity", "")
 	cursor, hasCursor := decodeCursor(c.Query("cursor", ""))
 
 	owner := c.UserID()
@@ -79,6 +81,12 @@ func (s *Server) gallery(c *Ctx) error {
 			if !to.IsZero() && o.CreatedAt.After(to) {
 				continue
 			}
+			if validityFilter == "invalid" && o.Validity.Status != "invalid" {
+				continue
+			}
+			if validityFilter == "ok" && o.Validity.Status != "ok" {
+				continue
+			}
 			total++
 			allBytes += o.Size
 			b := buckets[o.Bucket]
@@ -97,7 +105,7 @@ func (s *Server) gallery(c *Ctx) error {
 			items = append(items, galleryItem{
 				ID: o.ID, Bucket: o.Bucket, Key: o.ObjectKey, FileName: o.FileName,
 				MimeType: o.MimeType, Size: o.Size, Category: o.Category,
-				OwnerID: o.OwnerID, PluginID: o.PluginID, CreatedAt: o.CreatedAt,
+				OwnerID: o.OwnerID, PluginID: o.PluginID, Validity: o.Validity, CreatedAt: o.CreatedAt,
 			})
 		}
 		return nil

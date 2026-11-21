@@ -4,6 +4,7 @@
 package app
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"time"
@@ -13,28 +14,33 @@ import (
 	"github.com/Mr-losfer/s3bridge/internal/health"
 	"github.com/Mr-losfer/s3bridge/internal/obs"
 	"github.com/Mr-losfer/s3bridge/internal/plugin"
+	pluginrt "github.com/Mr-losfer/s3bridge/internal/plugin/runtime"
 	"github.com/Mr-losfer/s3bridge/internal/plugins/workbuddy"
 	"github.com/Mr-losfer/s3bridge/internal/s3gateway"
 	"github.com/Mr-losfer/s3bridge/internal/store"
 	"github.com/Mr-losfer/s3bridge/internal/updater"
 	"github.com/Mr-losfer/s3bridge/internal/upload"
+	"github.com/Mr-losfer/s3bridge/internal/validity"
 )
 
 type Core struct {
-	Cfg       *config.Config
-	Store     store.Store
-	Auth      *auth.Service
-	Registry  *plugin.Registry
-	Plugins   *plugin.Manager
-	Uploads   *upload.Service
-	S3        *s3gateway.Gateway
-	Health    *health.Scheduler
-	Updater   *updater.Updater
-	Obs       *obs.Collector
-	Thumbs    *obs.ThumbCache
-	Auditor   *obs.Auditor
-	Version   string
-	StartedAt time.Time
+	Cfg      *config.Config
+	Store    store.Store
+	Auth     *auth.Service
+	Runtime  *pluginrt.Runtime
+	Plugins  *plugin.Manager
+	Uploads  *upload.Service
+	S3       *s3gateway.Gateway
+	Health   *health.Scheduler
+	Updater  *updater.Updater
+	Obs      *obs.Collector
+	Thumbs   *obs.ThumbCache
+	Auditor  *obs.Auditor
+	Validity *validity.Checker
+	// ProbeSecret 供图片巡检向本机回环发 HEAD 时签名，避免探测接口被外部滥用。
+	ProbeSecret []byte
+	Version     string
+	StartedAt   time.Time
 }
 
 // New 构建核心依赖，并执行首次启动的引导（管理员、默认 bucket、内置插件）。
@@ -48,14 +54,19 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		return nil, fmt.Errorf("初始化管理员: %w", err)
 	}
 
-	reg := plugin.NewRegistry()
-	if err := reg.Register(workbuddy.Descriptor()); err != nil {
-		return nil, fmt.Errorf("注册插件: %w", err)
+	// 插件运行时：落盘 SDK、探测 Go 工具链。工具链缺失时仍可运行已编译插件。
+	rt, err := pluginrt.New(pluginrt.Options{
+		PluginsDir: cfg.PluginsDir, CacheDir: cfg.PluginCacheDir,
+		BuildTimeout: 2 * time.Minute, IdleTimeout: 10 * time.Minute, CallTimeout: 60 * time.Second,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("初始化插件运行时: %w", err)
 	}
-	mgr := plugin.NewManager(st, reg,
+	mgr := plugin.NewManager(st, rt, cfg.PluginsDir,
 		func(v string) (string, error) { return auth.Encrypt(cfg.MasterKey, v) },
 		func(v string) (string, error) { return auth.Decrypt(cfg.MasterKey, v) },
 		cfg.DefaultHealthEvery,
+		[]plugin.Builtin{workbuddy.Builtin()},
 	)
 	if err := mgr.EnsureBuiltin(); err != nil {
 		return nil, fmt.Errorf("初始化插件: %w", err)
@@ -78,12 +89,22 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		return nil, fmt.Errorf("初始化版本更新器: %w", err)
 	}
 
+	// 探测密钥由主密钥派生，不落盘、不随状态文件导出。
+	probeSeed := sha256.Sum256(append([]byte("object-probe:"), cfg.MasterKey...))
 	core := &Core{
-		Cfg: cfg, Store: st, Auth: authSvc, Registry: reg, Plugins: mgr,
+		Cfg: cfg, Store: st, Auth: authSvc, Runtime: rt, Plugins: mgr,
 		Uploads: uploads, S3: s3gw, Health: health.New(mgr), Updater: upd,
-		Auditor: obs.NewAuditor(),
+		Auditor: obs.NewAuditor(), ProbeSecret: probeSeed[:],
 		Version: version, StartedAt: time.Now().UTC(),
 	}
+	var vSettings store.Settings
+	_ = st.View(func(state *store.State) error { vSettings = state.Settings; return nil })
+	core.Validity = validity.New(st, validity.Options{
+		Enabled:       vSettings.ImageValidityEnabled,
+		Interval:      time.Duration(vSettings.ImageValidityIntervalHours) * time.Hour,
+		FailThreshold: vSettings.ImageValidityFailThreshold,
+		BaseURL:       validity.LoopbackBase(cfg.Addr), Secret: probeSeed[:],
+	})
 	// 监控是增强能力：初始化失败只降级，不影响上传与 S3 主链路。
 	if col, err := obs.New(obs.Options{Dir: cfg.ObsDir}); err == nil {
 		core.Obs = col
@@ -100,11 +121,17 @@ func New(cfg *config.Config, version string) (*Core, error) {
 
 // Close 停止后台 goroutine 并释放资源。
 func (c *Core) Close() error {
+	if c.Validity != nil {
+		c.Validity.Stop()
+	}
 	if c.Health != nil {
 		c.Health.Stop()
 	}
 	if c.Updater != nil {
 		c.Updater.Stop()
+	}
+	if c.Runtime != nil {
+		_ = c.Runtime.Close()
 	}
 	if c.Obs != nil {
 		_ = c.Obs.Close()

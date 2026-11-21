@@ -129,7 +129,7 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 	// 2) 调用插件，转换为统一标准输出
 	result, err := s.mgr.Upload(ctx, pluginID, plugin.UploadRequest{
 		FileName: req.FileName, MimeType: mimeType, Size: written,
-		Reader: tmp, Bucket: bucket, ObjectKey: key, UserID: req.OwnerID,
+		Reader: tmp, Path: tmpName, Bucket: bucket, ObjectKey: key, UserID: req.OwnerID,
 	})
 	_ = tmp.Close()
 	if err != nil {

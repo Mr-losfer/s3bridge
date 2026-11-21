@@ -59,6 +59,14 @@ func Open(path string) (*JSONStore, error) {
 	if s.state.Settings.SiteName == "" {
 		s.state.Settings = DefaultSettings()
 	}
+	// 老状态文件没有有效性巡检字段：按默认开启、72 小时迁移。
+	if s.state.Settings.ImageValidityIntervalHours <= 0 {
+		s.state.Settings.ImageValidityIntervalHours = 72
+		s.state.Settings.ImageValidityEnabled = true
+	}
+	if s.state.Settings.ImageValidityFailThreshold <= 0 {
+		s.state.Settings.ImageValidityFailThreshold = 2
+	}
 	return s, nil
 }
 

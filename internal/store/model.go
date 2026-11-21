@@ -210,6 +210,19 @@ type Object struct {
 	LocalPath   string       `json:"localPath"` // 相对 ObjectDir 的安全路径
 	OwnerID     string       `json:"ownerId"`
 	CreatedAt   time.Time    `json:"createdAt"`
+	// Validity 是图片有效性巡检结果（只对本地归档的图片有意义）。
+	Validity ObjectValidity `json:"validity,omitempty"`
+}
+
+// ObjectValidity 记录最近一次图片有效性巡检的结果。
+// 巡检只发 HEAD 判断「是否返回图片」，不下载正文。
+type ObjectValidity struct {
+	Status      string     `json:"status,omitempty"` // ok|invalid|unknown
+	CheckedAt   *time.Time `json:"checkedAt,omitempty"`
+	FailCount   int        `json:"failCount,omitempty"`
+	HTTPStatus  int        `json:"httpStatus,omitempty"`
+	ContentType string     `json:"contentType,omitempty"`
+	Error       string     `json:"error,omitempty"`
 }
 
 // ---------- 插件 ----------
@@ -253,9 +266,14 @@ type Plugin struct {
 	SuccessCount  int               `json:"successCount"`
 	LatencyMs     int64             `json:"latencyMs"`
 	Health        HealthConfig      `json:"health"`
-	Revision      int64             `json:"revision"`             // 乐观锁，差量/全量更新用
-	Definition    string            `json:"definition,omitempty"` // 自定义插件的声明式源码（JSON）
-	Custom        bool              `json:"custom"`               // 是否由 MCP/后台动态创建
+	Revision      int64             `json:"revision"`                // 乐观锁，差量/全量更新用
+	Definition    string            `json:"definition,omitempty"`    // v1.x 声明式源码，仅用于迁移
+	Custom        bool              `json:"custom"`                  // 是否由 MCP/后台动态创建
+	Dir           string            `json:"dir,omitempty"`           // 插件文件夹绝对路径
+	BuiltAt       *time.Time        `json:"builtAt,omitempty"`       // 最近一次编译成功时间
+	BuildSHA      string            `json:"buildSha,omitempty"`      // 编译产物 SHA-256
+	BuildError    string            `json:"buildError,omitempty"`    // 最近一次编译错误
+	ValidityHours int               `json:"validityHours,omitempty"` // 图片有效性巡检间隔覆盖（小时）
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`
 }
@@ -323,6 +341,10 @@ type Settings struct {
 	AlertOnFailure      bool   `json:"alertOnFailure"`
 	UploadRetentionDays int    `json:"uploadRetentionDays"`
 	Announcement        string `json:"announcement"`
+	// 图片有效性巡检：默认 72 小时一次，仅对本地归档图片发 HEAD 判断。
+	ImageValidityEnabled       bool `json:"imageValidityEnabled"`
+	ImageValidityIntervalHours int  `json:"imageValidityIntervalHours"`
+	ImageValidityFailThreshold int  `json:"imageValidityFailThreshold"`
 }
 
 func DefaultSettings() Settings {
@@ -330,6 +352,8 @@ func DefaultSettings() Settings {
 		SiteName: "S3Bridge", DefaultPlugin: "workbuddy",
 		HealthEnabled: true, HealthIntervalSecs: 300,
 		AlertOnFailure: true, UploadRetentionDays: 90,
+		ImageValidityEnabled: true, ImageValidityIntervalHours: 72,
+		ImageValidityFailThreshold: 2,
 	}
 }
 

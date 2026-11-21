@@ -46,6 +46,8 @@ type Config struct {
 	ObjectDir          string
 	ObsDir             string
 	ThumbDir           string
+	PluginsDir         string
+	PluginCacheDir     string
 	MasterKey          []byte
 	SessionSecret      []byte
 	BootstrapUser      string
@@ -111,6 +113,14 @@ func Load() (*Config, error) {
 	c.ObsDir = filepath.Join(c.DataDir, "obs")
 	if err := os.MkdirAll(c.ObsDir, 0o700); err != nil {
 		return nil, fmt.Errorf("创建监控目录: %w", err)
+	}
+	// Go 插件源码与编译缓存：源码随数据卷持久化，缓存可随时删除重建。
+	c.PluginsDir = filepath.Join(c.DataDir, "plugins")
+	c.PluginCacheDir = filepath.Join(c.DataDir, "cache")
+	for _, dir := range []string{c.PluginsDir, c.PluginCacheDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("创建插件目录 %s: %w", dir, err)
+		}
 	}
 	c.ThumbDir = filepath.Join(c.DataDir, "thumbs")
 	if err := os.MkdirAll(c.ThumbDir, 0o700); err != nil {
