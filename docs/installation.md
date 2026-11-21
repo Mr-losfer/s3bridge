@@ -54,8 +54,10 @@ v2.0 起插件在**运行时**用 `go build` 编译，因此镜像分两种：
 
 | 标签 | 体积 | 能做什么 |
 | --- | --- | --- |
-| `ghcr.io/mr-losfer/s3bridge:latest` / `:v2.0.0` | 约 20 MB | 运行已编译好的插件；新建/修改源码时会提示未安装 Go |
-| `ghcr.io/mr-losfer/s3bridge:latest-go` / `:v2.0.0-go` | 约 320 MB（含 Go） | 全部功能：后台编辑源码、让 Agent 写插件、保存即编译 |
+| `ghcr.io/mr-losfer/s3bridge:latest`（或固定版本 `:v2.0.1`） | 约 20 MB | 运行已编译好的插件；新建/修改源码时会提示未安装 Go |
+| `ghcr.io/mr-losfer/s3bridge:latest-go`（或 `:v2.0.1-go`） | 约 320 MB（含 Go） | 全部功能：后台编辑源码、让 Agent 写插件、保存即编译 |
+
+生产环境建议固定版本号而不是 `latest`，避免自动升级带来意外。
 
 只做上传转发就用精简版；需要在线开发插件（或让 AI 全程开发）请用 `-go` 版本：
 
