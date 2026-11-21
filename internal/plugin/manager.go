@@ -186,12 +186,20 @@ func (m *Manager) migrateLegacy() error {
 		_, statErr := os.Stat(filepath.Join(dir, "plugin.json"))
 		if statErr != nil {
 			// 自定义声明式插件无法自动翻译成 Go：生成一份带说明的骨架，原 JSON 留档。
+			// 参数键与文件类型要带过去，否则用户在后台看不到自己配过什么。
 			mf := Manifest{
 				Schema: ManifestSchema, ID: p.ID, Name: p.Name, Version: p.Version,
 				Description: p.Description, Author: p.Author, Priority: p.Priority,
-				TimeoutSecs: 60, Health: HealthHint{Enabled: false, TimeoutSecs: 8, FailThreshold: 2},
+				FileTypes:   fileTypesToStrings(p.FileTypes),
+				TimeoutSecs: 60,
+				Health: HealthHint{
+					Enabled: p.Health.Enabled, IntervalSecs: p.Health.IntervalSecs,
+					TimeoutSecs: p.Health.TimeoutSecs, FailThreshold: p.Health.FailThreshold,
+					ProbeMode: p.Health.ProbeMode,
+				},
+				Params: legacyParamFields(p.Params),
 				Docs: "该插件由 v1.x 的声明式定义迁移而来。原定义见 legacy-definition.json。\n\n" +
-					"声明式请求模板已不再支持，请在 main.go 中用 Go 实现上传逻辑，保存后自动编译。",
+					"声明式请求模板已不再支持，请在 main.go 中用 Go 实现上传逻辑，保存并编译通过后手动启用。",
 			}
 			_ = os.MkdirAll(dir, 0o700)
 			_ = SaveManifest(dir, mf)
@@ -205,10 +213,13 @@ func (m *Manager) migrateLegacy() error {
 				}
 				cur.Dir = dir
 				cur.Definition = ""
-				cur.Status = store.StatusUnhealthy
-				cur.StatusMessage = "声明式引擎已移除：请用 Go 重写 main.go 后保存编译"
+				// 骨架里 Upload 只会返回「尚未实现」，留着启用会被调度到然后必然失败；
+				// 停用并写明原因，等用户重写后自己开启。
+				cur.Enabled = false
+				cur.Status = store.StatusDisabled
+				cur.StatusMessage = "声明式引擎已移除：请用 Go 重写 main.go，编译通过后启用"
 				cur.UpdatedAt = store.NowUTC()
-				st.Changes = append(st.Changes, newChange(p.ID, "migrate", "system", nil, "声明式插件迁移为 Go 骨架，等待重写"))
+				st.Changes = append(st.Changes, newChange(p.ID, "migrate", "system", nil, "声明式插件迁移为 Go 骨架，已停用等待重写"))
 				return nil
 			}); err != nil {
 				return err
@@ -226,6 +237,55 @@ func (m *Manager) migrateLegacy() error {
 		})
 	}
 	return nil
+}
+
+// fileTypesToStrings 把存储层的文件类型转成清单里的字符串数组。
+func fileTypesToStrings(types []store.FileCategory) []string {
+	if len(types) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		out = append(out, string(t))
+	}
+	return out
+}
+
+// legacyParamFields 把 v1.x 的参数键翻译成清单字段。
+//
+// 只有键名没有元信息，所以一律按字符串处理；命中密钥类关键词的标为敏感，
+// 这样旧的 enc: 密文在后台仍然以脱敏形式展示，解密链路也能直接复用。
+// 排序后输出，保证同一份数据每次迁移得到的 plugin.json 一致。
+func legacyParamFields(params map[string]string) []ParamField {
+	if len(params) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]ParamField, 0, len(keys))
+	for _, k := range keys {
+		f := ParamField{Key: k, Label: k, Type: "text", Help: "由 v1.x 声明式插件迁移"}
+		if looksSecret(k) {
+			f.Type = "secret"
+			f.Sensitive = true
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// looksSecret 用键名猜测是否为凭据类参数。
+func looksSecret(key string) bool {
+	k := strings.ToLower(key)
+	for _, hint := range []string{"key", "token", "secret", "password", "passwd", "cookie", "credential", "auth"} {
+		if strings.Contains(k, hint) {
+			return true
+		}
+	}
+	return false
 }
 
 // Warmup 预编译「已启用但产物缺失」的插件。
@@ -342,13 +402,15 @@ func (m *Manager) viewOf(p *store.Plugin) View {
 			}
 		}
 	}
-	if p.Enabled {
-		if _, err := OpenParams(p.Params, m.open); err == nil {
-			view.Params = MaskParams(mf, p.Params)
-			view.Warning = VolatileWarning(mf, mustPlain(p.Params, m.open))
+	// 参数一律回显（敏感值走脱敏），停用的插件也不例外：
+	// 否则用户停用后再打开表单会看到一片空白，一保存就把原有参数抹掉了。
+	view.Params = MaskParams(mf, p.Params)
+	if plain, err := OpenParams(p.Params, m.open); err != nil {
+		if p.Enabled {
+			view.Warning = "参数解密失败，请重新填写敏感字段"
 		}
-	} else {
-		view.Params = map[string]any{}
+	} else if p.Enabled {
+		view.Warning = VolatileWarning(mf, plain)
 	}
 	if p.BuildError != "" {
 		if view.Warning != "" {
