@@ -68,9 +68,14 @@ func ValidateParams(m Manifest, params map[string]string) error {
 
 // VolatileWarning 检查临时参数（如 Bearer Token）是否已过期或即将过期，
 // 返回给前端与告警中心的提示文本。
+//
+// 参数本身留空时直接跳过：可选的临时凭据没配置属于「未启用」，不该被报成过期。
 func VolatileWarning(m Manifest, params map[string]string) string {
 	for _, f := range m.Params {
 		if !f.Volatile || f.ExpiresField == "" {
+			continue
+		}
+		if strings.TrimSpace(params[f.Key]) == "" {
 			continue
 		}
 		raw := strings.TrimSpace(params[f.ExpiresField])
