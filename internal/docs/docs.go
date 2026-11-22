@@ -27,6 +27,7 @@ var titles = map[string]string{
 	"installation":       "安装与部署",
 	"monitoring":         "监控中心与存储体检",
 	"gallery":            "全站图片相册",
+	"interfaces":         "接入方式：开放上传 / WebDAV / FTP",
 }
 
 // Get 按名称返回 Markdown 正文。

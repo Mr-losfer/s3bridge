@@ -325,7 +325,7 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ## 4. MCP 资源（Resources）
 
-`resources/list` 返回 6 份文档资源，`resources/read` 按 URI 读取 Markdown 正文：
+`resources/list` 返回 7 份文档资源，`resources/read` 按 URI 读取 Markdown 正文：
 
 | URI | 内容 |
 | --- | --- |
@@ -335,6 +335,7 @@ curl -s -X POST http://localhost:8080/mcp \
 | `docs://installation` | 安装与部署 |
 | `docs://monitoring` | 监控中心与存储体检 |
 | `docs://gallery` | 全站图片相册 |
+| `docs://interfaces` | 接入方式：开放上传 / WebDAV / FTP |
 
 文档由 `//go:embed` 打包进二进制，与仓库 `docs/*.md`、后台文档中心、`plugin_docs` 工具**始终是同一份内容**，不会出现版本漂移。
 

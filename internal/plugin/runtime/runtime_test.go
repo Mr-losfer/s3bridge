@@ -236,6 +236,23 @@ func TestLoadUpgradesLegacyEntry(t *testing.T) {
 	}
 }
 
+func TestEnsureLoadedUpgradesLegacyEntry(t *testing.T) {
+	// 回归：启动预加载走 EnsureLoaded → start，曾绕过 NormalizeEntry，
+	// 升级后的旧插件会在预加载阶段直接报
+	// main.go:237:25: cannot use type main.plugin as type sdk.UploadFunc。
+	rt := newRuntime(t)
+	legacy := strings.Replace(rtPlugin, "sdk.Serve(plugin{}.Upload, plugin{}.Check)", "sdk.Serve(plugin{})", 1)
+	dir := writeSource(t, rt, "legacy-ensure", legacy)
+
+	if err := rt.EnsureLoaded(context.Background(), "legacy-ensure", dir); err != nil {
+		t.Fatalf("预加载路径也应自动升级旧入口: %v", err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if !strings.Contains(string(raw), "(plugin{}).Upload") {
+		t.Fatalf("预加载路径未改写旧入口:\n%s", raw)
+	}
+}
+
 func TestDropRestartsProcess(t *testing.T) {
 	rt := newRuntime(t)
 	dir := writeSource(t, rt, "demo", rtPlugin)

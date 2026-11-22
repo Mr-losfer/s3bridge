@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2, Images } from 'lucide-vue-next'
+import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2, Images, Network, FolderTree, Terminal, Link2 } from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { can } from '../session'
@@ -28,6 +28,7 @@ const pwdSaving = ref(false)
 const pwd = ref({ oldPassword: '', newPassword: '', confirm: '' })
 
 const canManage = computed(() => can('system:manage'))
+const origin = window.location.origin
 
 async function load() {
   loading.value = true
@@ -43,6 +44,12 @@ async function load() {
       imageValidityEnabled: s?.imageValidityEnabled !== false,
       imageValidityIntervalHours: s?.imageValidityIntervalHours || 72,
       imageValidityFailThreshold: s?.imageValidityFailThreshold || 2,
+      webdavEnabled: s?.webdavEnabled !== false,
+      ftpEnabled: !!s?.ftpEnabled,
+      ftpAddr: s?.ftpAddr || ':2121',
+      ftpPassivePorts: s?.ftpPassivePorts || '',
+      ftpPublicIp: s?.ftpPublicIp || '',
+      openUploadBucket: s?.openUploadBucket || 'default',
     }
   } catch (e) { notifyError(e, '加载系统设置失败') }
   finally { loading.value = false }
@@ -62,10 +69,16 @@ async function save() {
         imageValidityEnabled: form.value.imageValidityEnabled,
         imageValidityIntervalHours: Number(form.value.imageValidityIntervalHours),
         imageValidityFailThreshold: Number(form.value.imageValidityFailThreshold),
+        webdavEnabled: form.value.webdavEnabled,
+        ftpEnabled: form.value.ftpEnabled,
+        ftpAddr: form.value.ftpAddr,
+        ftpPassivePorts: form.value.ftpPassivePorts,
+        ftpPublicIp: form.value.ftpPublicIp,
+        openUploadBucket: form.value.openUploadBucket,
       },
     })
     settings.value = r
-    notify('系统设置已保存，健康检测与图片巡检调度已生效', { title: '保存成功' })
+    notify('系统设置已保存；FTP/WebDAV 开关即时生效，FTP 监听地址变更会自动重启服务', { title: '保存成功' })
     await load()
   } catch (e) { notifyError(e, '保存失败') } finally { saving.value = false }
 }
@@ -86,7 +99,7 @@ async function changePassword() {
   <div>
     <PageHeader
       title="系统设置"
-      description="站点标识、默认插件、健康检测与图片有效性巡检策略。修改后立即生效，无需重启。"
+      description="站点标识、默认插件、健康检测、图片巡检与接入方式（WebDAV / FTP / 开放上传）。修改后立即生效，无需重启。"
     >
       <template #actions>
         <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
@@ -174,6 +187,85 @@ async function changePassword() {
           <Button :disabled="!canManage || saving || loading" @click="save">
             <Loader2 v-if="saving" class="animate-spin" /><Save v-else />{{ saving ? '保存中…' : '保存设置' }}
           </Button>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- 接入方式：WebDAV / FTP / 开放上传，统一用 API Key 认证 -->
+    <Card class="mt-5">
+      <CardHeader class="pb-4">
+        <div class="flex items-center gap-2">
+          <Network class="size-4 text-muted-foreground" />
+          <CardTitle>接入方式</CardTitle>
+        </div>
+        <CardDescription>
+          三种方式都只认 API Key（<code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">sk_…</code>），
+          与后台登录会话相互独立；在「API 密钥」页创建与撤销。
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="border-t pt-4">
+        <div class="grid gap-4 lg:grid-cols-3">
+          <div class="rounded-lg border p-3.5">
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <FolderTree class="size-4 text-muted-foreground" />
+                <p class="text-[12.5px] font-semibold">WebDAV</p>
+              </div>
+              <Switch v-model="form.webdavEnabled" :disabled="!canManage" class="mt-0.5 shrink-0" />
+            </div>
+            <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              挂在主服务同端口，不需要额外开放端口。路径 <code class="font-mono">/dav/{bucket}/{key}</code>，
+              根目录列出全部存储桶；支持 PROPFIND / GET / PUT / DELETE / MKCOL / MOVE / COPY。
+            </p>
+            <div class="mt-2 space-y-1 rounded-md bg-muted/50 px-2.5 py-2 font-mono text-[10.5px] leading-relaxed">
+              <p>{{ origin }}/dav/</p>
+              <p class="text-muted-foreground">用户名任意 · 密码填 API Key</p>
+            </div>
+          </div>
+
+          <div class="rounded-lg border p-3.5">
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <Terminal class="size-4 text-muted-foreground" />
+                <p class="text-[12.5px] font-semibold">FTP</p>
+              </div>
+              <Switch v-model="form.ftpEnabled" :disabled="!canManage" class="mt-0.5 shrink-0" />
+            </div>
+            <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              独立端口，仅被动模式。目录结构与存储桶一一对应，适合 Finder、资源管理器、FileZilla、rclone。
+              明文传输，建议只在内网或 SSH 隧道内使用。
+            </p>
+            <Field label="监听地址" class="mt-2">
+              <Input v-model="form.ftpAddr" :disabled="!canManage" placeholder=":2121" />
+            </Field>
+            <Field label="被动端口范围" class="mt-2" hint="Docker/NAT 需固定并映射，如 30000-30010；留空用随机端口">
+              <Input v-model="form.ftpPassivePorts" :disabled="!canManage" placeholder="留空用随机端口" />
+            </Field>
+            <Field label="对外通告地址" class="mt-2" hint="PASV 回复给客户端的 IPv4；留空用控制连接的内网地址">
+              <Input v-model="form.ftpPublicIp" :disabled="!canManage" placeholder="203.0.113.10" />
+            </Field>
+          </div>
+
+          <div class="rounded-lg border p-3.5">
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex items-center gap-2">
+                <Link2 class="size-4 text-muted-foreground" />
+                <p class="text-[12.5px] font-semibold">开放上传</p>
+              </div>
+              <Badge variant="success">常开</Badge>
+            </div>
+            <p class="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+              一个 API Key 直接投递文件，返回可嵌入的直链，无需登录。支持 multipart 与原始 body。
+            </p>
+            <div class="mt-2 rounded-md bg-muted/50 px-2.5 py-2 font-mono text-[10px] leading-relaxed break-all">
+              <p>POST /api/open/upload</p>
+              <p>X-API-Key: sk_…</p>
+              <p class="text-muted-foreground">→ url: /f/{bucket}/{key}?e=&amp;s=</p>
+            </div>
+            <Field label="默认存储桶" class="mt-2" hint="请求未指定 bucket 时的落点">
+              <Input v-model="form.openUploadBucket" :disabled="!canManage" placeholder="default" />
+            </Field>
+          </div>
         </div>
       </CardContent>
     </Card>

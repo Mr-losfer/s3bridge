@@ -47,6 +47,8 @@ func (s *Server) routes() {
 	r.Public("GET", "/api/health", s.health)
 	r.Public("GET", "/api/site", s.publicSite)
 	r.Public("POST", "/api/auth/login", s.login)
+	// 开放上传：只认 API Key，供脚本/第三方直接投递文件并拿回直链。
+	r.Public("POST", "/api/open/upload", s.openUpload)
 
 	// 当前身份
 	r.Handle("GET", "/api/me", s.me)
@@ -117,6 +119,7 @@ func (s *Server) routes() {
 	r.Public("HEAD", "/api/internal/object-probe", s.objectProbe)
 
 	r.Handle("GET", "/api/gallery", s.gallery, store.PermUploadRead)
+	r.Handle("GET", "/api/link/sign", s.linkSign, store.PermUploadRead)
 	r.Handle("GET", "/api/objects/thumb", s.objectThumb, store.PermUploadRead)
 
 	// 存储桶
@@ -162,6 +165,10 @@ func (s *Server) dispatch(w http.ResponseWriter, r *http.Request) {
 		s.router.ServeHTTP(w, r)
 	case strings.HasPrefix(p, "/s3"):
 		s.core.S3.ServeHTTP(w, r)
+	case strings.HasPrefix(p, "/f/"):
+		s.publicObject(w, r)
+	case p == "/dav", strings.HasPrefix(p, "/dav/"):
+		s.dav(w, r)
 	default:
 		s.web.ServeHTTP(w, r)
 	}

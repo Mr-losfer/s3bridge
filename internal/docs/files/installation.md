@@ -54,7 +54,7 @@ docker build -t s3bridge:local \
 
 | 标签 | 体积 | 说明 |
 | --- | --- | --- |
-| `ghcr.io/mr-losfer/s3bridge:latest`（或固定版本 `:v2.1.1`） | 约 23 MB（压缩后，即镜像仓库显示值） | 全部功能：后台编辑源码、让 Agent 写插件、保存即生效 |
+| `ghcr.io/mr-losfer/s3bridge:latest`（或固定版本 `:v2.2.0`） | 约 23 MB（压缩后，即镜像仓库显示值） | 全部功能：后台编辑源码、让 Agent 写插件、保存即生效 |
 
 解释器（`traefik/yaegi`）把标准库符号表编进了二进制，未压缩镜像约 55 MB，但压缩后**只有 22.9 MB**，
 与 v2.0.1 的 22.4 MB 基本持平——Go 二进制的压缩率很高，多出来的符号表几乎不占传输体积。

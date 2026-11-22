@@ -3,8 +3,9 @@ import { ref, onMounted, onBeforeUnmount, computed, watch } from 'vue'
 import {
   RefreshCw, Upload, Search, X, ChevronLeft, ChevronRight, Download, Copy, Trash2,
   ImageOff, FileText, FileArchive, Film, Music, File, Filter, Images, Database, Image as ImageIcon,
+  Play, Eye, Link2, ExternalLink,
 } from 'lucide-vue-next'
-import { api, downloadObject, getToken } from '../api'
+import { api, downloadObject } from '../api'
 import { notify, notifyError } from '../toast'
 import { go } from '../router'
 import { formatBytes, relTime, fmtTime, categoryLabel, categoryLabels } from '../utils'
@@ -26,7 +27,12 @@ const plugins = ref([])
 const loading = ref(true)
 const summary = ref({ total: 0, totalBytes: 0, categories: {}, buckets: {} })
 const filters = ref({ bucket: '', category: '', pluginId: '', keyword: '' })
-const preview = ref(null)   // { obj, url, loading, error }
+// 预览不再把文件读成 blob：直接用后端下发的直链（优先上游、其次本机签名链），
+// 浏览器自己去取字节，服务端只负责鉴权与签名。
+const preview = ref(null)   // { obj }
+const previewSrc = ref('')
+const previewError = ref('')
+const previewFallback = ref(false)
 const deleting = ref('')
 const copying = ref('')
 
@@ -36,6 +42,17 @@ const previewIndex = computed(() => preview.value ? items.value.findIndex((o) =>
 const imageCount = computed(() => items.value.filter((o) => isImage(o)).length)
 
 function isImage(o) { return (o.mimeType || '').startsWith('image/') }
+function isVideo(o) { return (o.mimeType || '').startsWith('video/') }
+function isAudio(o) { return (o.mimeType || '').startsWith('audio/') }
+function canPreview(o) { return isImage(o) || isVideo(o) || isAudio(o) }
+function previewHint(o) {
+  if (isImage(o)) return '预览'
+  if (isVideo(o)) return '播放'
+  if (isAudio(o)) return '试听'
+  return '下载'
+}
+// 直连优上游：上游链接能省掉本机带宽；没有或已过期时回退本站签名直链。
+function srcOf(o) { return o.previewUrl || o.directPath || '' }
 function extOf(o) {
   const n = o.fileName || o.objectKey || ''
   const i = n.lastIndexOf('.')
@@ -43,6 +60,11 @@ function extOf(o) {
 }
 const catIcons = { video: Film, audio: Music, document: FileText, archive: FileArchive, other: File }
 function categoryIcon(o) { return catIcons[o.category] || File }
+function primaryIcon(o) {
+  if (isImage(o)) return Eye
+  if (isVideo(o) || isAudio(o)) return Play
+  return Download
+}
 
 function buildQuery() {
   const q = new URLSearchParams()
@@ -75,7 +97,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
-  closeLightbox(true)
+  closeLightbox()
 })
 
 // 灯箱打开时锁定页面滚动，避免移动端背景跟随滑动。
@@ -88,30 +110,27 @@ function resetFilters() {
   load()
 }
 
-async function openLightbox(o) {
-  closeLightbox(true)
-  preview.value = { obj: o, url: '', loading: isImage(o), error: '' }
-  if (!isImage(o)) return
-  const target = o.id
-  try {
-    const q = new URLSearchParams({ bucket: o.bucket, key: o.objectKey })
-    const res = await fetch('/api/objects/download?' + q.toString(), {
-      headers: { Authorization: 'Bearer ' + getToken() },
-    })
-    if (!res.ok) throw new Error('对象读取失败（HTTP ' + res.status + '）')
-    const blob = await res.blob()
-    if (!preview.value || preview.value.obj.id !== target) return
-    preview.value.url = URL.createObjectURL(blob)
-  } catch (e) {
-    if (preview.value?.obj.id === target) preview.value.error = e.message || '图片加载失败'
-  } finally {
-    if (preview.value?.obj.id === target) preview.value.loading = false
-  }
+function openLightbox(o) {
+  preview.value = { obj: o }
+  previewError.value = ''
+  previewFallback.value = false
+  previewSrc.value = srcOf(o)
+  if (!previewSrc.value) previewError.value = '该对象没有可用的预览地址'
 }
-function closeLightbox(silent = false) {
-  if (preview.value?.url) URL.revokeObjectURL(preview.value.url)
+function closeLightbox() {
   preview.value = null
-  if (!silent) { /* 关闭动画无需额外处理 */ }
+  previewSrc.value = ''
+  previewError.value = ''
+}
+// 上游直链失效时自动退回本站直链，避免第三方签名过期后整页破图。
+function onPreviewError() {
+  const o = preview.value?.obj
+  if (o && o.directPath && previewSrc.value !== o.directPath) {
+    previewSrc.value = o.directPath
+    previewFallback.value = true
+    return
+  }
+  previewError.value = '对象无法在线预览，可下载原文件查看'
 }
 function step(delta) {
   if (!items.value.length) return
@@ -141,6 +160,17 @@ async function remove(o) {
     await load()
   } catch (e) { notifyError(e, '删除失败') }
   finally { deleting.value = '' }
+}
+
+async function copyDirect(o) {
+  try {
+    let path = o.directPath
+    if (!path) {
+      const r = await api(`/link/sign?bucket=${encodeURIComponent(o.bucket)}&key=${encodeURIComponent(o.objectKey)}`)
+      path = r.directPath
+    }
+    copy(window.location.origin + path, '直链', o.id)
+  } catch (e) { notifyError(e, '生成直链失败') }
 }
 
 function copy(text, label, id = '') {
@@ -214,20 +244,49 @@ function copy(text, label, id = '') {
     </div>
 
     <div v-else-if="items.length" class="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
-      <button
+      <div
         v-for="o in items" :key="o.id"
-        class="group relative overflow-hidden rounded-xl border bg-card text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
-        @click="openLightbox(o)"
+        class="group relative cursor-pointer overflow-hidden rounded-xl border bg-card text-left transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/40"
+        :tabindex="0"
+        @click="canPreview(o) ? openLightbox(o) : download(o)"
+        @keyup.enter="canPreview(o) ? openLightbox(o) : download(o)"
       >
         <div class="relative">
           <ObjectThumb v-if="isImage(o)" :bucket="o.bucket" :object-key="o.objectKey" :alt="o.fileName" />
-          <div v-else class="flex aspect-[4/3] w-full items-center justify-center bg-muted/60">
+          <div v-else class="flex aspect-[4/3] w-full flex-col items-center justify-center gap-2 bg-muted/60">
             <component :is="categoryIcon(o)" class="size-7 text-muted-foreground/60" />
+            <span class="text-[10px] text-muted-foreground">{{ previewHint(o) }}</span>
           </div>
-          <span class="absolute bottom-1.5 left-1.5 rounded bg-black/65 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-white backdrop-blur-sm">
+          <span class="absolute left-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-white backdrop-blur-sm">
             {{ extOf(o) }}
           </span>
           <Badge variant="outline" class="absolute right-1.5 top-1.5 border-border/60 bg-background/90 backdrop-blur-sm">{{ categoryLabel(o.category) }}</Badge>
+
+          <!-- 类型对应的快捷操作：图片看大图、音视频直接播、其余下载 -->
+          <div class="absolute inset-x-1.5 bottom-1.5 flex items-center justify-end gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+            <button
+              class="grid size-7 place-items-center rounded-md bg-black/65 text-white backdrop-blur-sm transition-colors hover:bg-black/80"
+              :title="previewHint(o)" :aria-label="previewHint(o)"
+              @click.stop="canPreview(o) ? openLightbox(o) : download(o)"
+            ><component :is="primaryIcon(o)" class="size-3.5" /></button>
+            <button
+              v-if="canPreview(o)"
+              class="grid size-7 place-items-center rounded-md bg-black/65 text-white backdrop-blur-sm transition-colors hover:bg-black/80"
+              title="下载原文件" aria-label="下载原文件"
+              @click.stop="download(o)"
+            ><Download class="size-3.5" /></button>
+            <button
+              class="grid size-7 place-items-center rounded-md bg-black/65 text-white backdrop-blur-sm transition-colors hover:bg-black/80"
+              title="复制直链" aria-label="复制直链"
+              @click.stop="copyDirect(o)"
+            ><Link2 class="size-3.5" /></button>
+            <button
+              class="grid size-7 place-items-center rounded-md bg-black/65 text-white backdrop-blur-sm transition-colors hover:bg-destructive"
+              title="删除" aria-label="删除"
+              :disabled="deleting === o.id"
+              @click.stop="remove(o)"
+            ><Trash2 class="size-3.5" /></button>
+          </div>
         </div>
         <div class="border-t px-2.5 py-2">
           <p class="truncate text-[12px] font-medium" :title="o.fileName">{{ o.fileName }}</p>
@@ -236,7 +295,7 @@ function copy(text, label, id = '') {
             <span>{{ relTime(o.createdAt) }}</span>
           </div>
         </div>
-      </button>
+      </div>
     </div>
 
     <Card v-else class="mt-4">
@@ -263,17 +322,30 @@ function copy(text, label, id = '') {
             aria-label="上一个" @click="step(-1)"
           ><ChevronLeft class="size-5" /></button>
 
+          <!-- 预览一律直连：图片/视频由浏览器自己去上游或本站直链取字节，
+               服务端不转发正文；全局 no-referrer 让防盗链的 CDN 也放行。 -->
           <img
-            v-if="preview.url" :src="preview.url" :alt="preview.obj.fileName"
-            class="max-h-full max-w-full rounded object-contain shadow-2xl" @click.stop
+            v-if="isImage(preview.obj) && previewSrc && !previewError"
+            :src="previewSrc" :alt="preview.obj.fileName" referrerpolicy="no-referrer"
+            class="max-h-full max-w-full rounded object-contain shadow-2xl" @click.stop @error="onPreviewError"
           />
-          <div v-else-if="preview.loading" class="flex flex-col items-center gap-3 text-white/60">
-            <span class="size-5 animate-spin rounded-full border-2 border-white/20 border-t-white/80" />
-            <span class="text-[11.5px]">正在读取对象…</span>
+          <video
+            v-else-if="isVideo(preview.obj) && previewSrc && !previewError"
+            :src="previewSrc" controls autoplay playsinline
+            class="max-h-full max-w-full rounded shadow-2xl" @click.stop @error="onPreviewError"
+          />
+          <div
+            v-else-if="isAudio(preview.obj) && previewSrc && !previewError"
+            class="w-full max-w-md rounded-2xl border border-white/10 bg-white/5 p-6 text-center"
+            @click.stop
+          >
+            <Music class="mx-auto size-9 text-white/50" />
+            <p class="mt-3 truncate text-[12px] text-white/80">{{ preview.obj.fileName }}</p>
+            <audio :src="previewSrc" controls autoplay class="mt-4 w-full" @error="onPreviewError" />
           </div>
           <div v-else class="flex max-w-xs flex-col items-center gap-2 px-4 text-center">
             <component :is="categoryIcon(preview.obj)" class="size-10 text-white/45" />
-            <p class="text-[11.5px] leading-relaxed text-white/60">{{ preview.error || '该类型不支持在线预览，请在右侧下载原文件' }}</p>
+            <p class="text-[11.5px] leading-relaxed text-white/60">{{ previewError || '该类型不支持在线预览，请在右侧下载原文件' }}</p>
           </div>
 
           <button
@@ -322,12 +394,22 @@ function copy(text, label, id = '') {
                 <p class="text-[10.5px] text-muted-foreground">本地归档路径</p>
                 <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ preview.obj.localPath || '—' }}</p>
               </div>
+              <div>
+                <p class="flex items-center gap-1 text-[10.5px] text-muted-foreground">
+                  直链
+                  <span class="rounded bg-muted px-1 py-0.5 text-[9px]">
+                    {{ preview.obj.previewUrl && !previewFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range' }}
+                  </span>
+                </p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ preview.obj.directPath || '—' }}</p>
+              </div>
             </div>
           </div>
 
           <div class="flex flex-wrap gap-2 border-t bg-muted/30 px-4 py-3">
             <Button size="sm" @click="download(preview.obj)"><Download />下载原文件</Button>
             <Button size="sm" variant="outline" @click="copy(`s3://${preview.obj.bucket}/${preview.obj.objectKey}`, 'S3 URI')"><Copy />复制 S3 路径</Button>
+            <Button size="sm" variant="outline" @click="copyDirect(preview.obj)"><Link2 />复制直链</Button>
             <Button v-if="preview.obj.remoteUrl" size="sm" variant="ghost" @click="copy(preview.obj.remoteUrl, '第三方 URL')">复制外链</Button>
             <Button size="sm" variant="ghost" class="ml-auto text-destructive hover:bg-destructive/10 hover:text-destructive" :disabled="deleting === preview.obj.id" @click="remove(preview.obj)">
               <Trash2 />删除

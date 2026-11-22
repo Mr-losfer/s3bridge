@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strconv"
@@ -145,6 +146,22 @@ func (r *Runtime) start(ctx context.Context, id, dir string) (*process, error) {
 	r.mu.Unlock()
 
 	dir = absDir(dir)
+	// 入口改写必须在这里做，而不是只在 Load 里做：启动预加载（EnsureLoaded）、
+	// 调用时自动拉起都会绕过 Load。v2.0 的 sdk.Serve(plugin{}) 单参写法在解释器
+	// 里无法通过类型检查（cannot use type main.plugin as type sdk.UploadFunc），
+	// 遗漏这条路径会让升级后的旧插件在预加载阶段直接失败。
+	// 改写会写回源文件，而预加载/健康检查/手动加载可能并发触发，用 normMu 串行化。
+	changed, err := func() (bool, error) {
+		r.normMu.Lock()
+		defer r.normMu.Unlock()
+		return engine.NormalizeEntry(dir)
+	}()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrLoad, err)
+	}
+	if changed {
+		slog.Info("已自动升级插件入口为注册式", "plugin", id)
+	}
 	p := &process{id: id, log: &ringBuf{max: 32 << 10}, done: make(chan struct{})}
 	p.lastUsed.Store(time.Now().UnixNano())
 

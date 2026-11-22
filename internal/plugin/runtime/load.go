@@ -9,14 +9,11 @@ package runtime
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/Mr-losfer/s3bridge/internal/plugin/engine"
 )
 
 type Options struct {
@@ -33,6 +30,8 @@ type Runtime struct {
 
 	mu    sync.Mutex
 	procs map[string]*process
+	// normMu 串行化入口改写：写回源文件时不能被另一个加载路径插队。
+	normMu sync.Mutex
 
 	stopOnce sync.Once
 	stop     chan struct{}
@@ -112,13 +111,6 @@ func (r *Runtime) Close() error {
 // 加载失败不会影响旧进程之外的任何状态，错误信息直接来自解释器，带 文件:行:列。
 func (r *Runtime) Load(ctx context.Context, id, dir string) (*LoadResult, error) {
 	start := time.Now()
-	if changed, err := engine.NormalizeEntry(dir); err != nil {
-		wrapped := fmt.Errorf("%w: %v", engine.ErrLoad, err)
-		return &LoadResult{Output: wrapped.Error(), DurationMs: time.Since(start).Milliseconds()}, wrapped
-	} else if changed {
-		slog.Info("已自动升级插件入口为注册式", "plugin", id)
-	}
-
 	r.Drop(id)
 	p, err := r.start(ctx, id, dir)
 	if err != nil {

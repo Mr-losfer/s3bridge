@@ -85,19 +85,53 @@ release:
   prerelease: auto
   name_template: "S3Bridge {{ .Version }}"
   header: |
-    ### 本次修复（v2.1.0 之后）
+    ### 修复旧插件加载 + 三种新的接入方式
 
-    * **修复：加载成功后状态一直显示「尚未加载」**。新建插件写入源码、加载已经成功，界面顶部却还停在「新建插件，尚未加载」，
-      看起来像没生效。原因是加载成功只有在状态为「异常」时才改写消息。现在只要不是停用或已健康，一律回落到
-      「已加载，等待健康检测」；同时补了一个覆盖「创建 → 写坏 → 修好」全过程的用例，避免再回归
-    * **修复：源码页的加载日志标签写着 `GO BUILD`**。v2.1.0 已经不再编译，标签却沿用了 v2.0 的写法，
-      与「内嵌解释器」自相矛盾。改为 `ENGINE`，与后端日志前缀 `[engine]` 一致
-    * **清理**：`PluginSource` 组件里恒为真的 `toolchain` 开关（以及它导致的按钮禁用条件）已移除，
-      后端字段保留为兼容值
+    #### 修复：升级后 WorkBuddy 插件报「cannot use type main.plugin as type sdk.UploadFunc」
 
-    > 插件引擎「不再需要 Go 工具链、在线编写保存即生效」的完整说明与实测数据，见
-    > [v2.1.0 发布说明](https://github.com/Mr-losfer/s3bridge/releases/tag/v2.1.0)。
-    > 从 v2.1.0 升级无需任何操作，覆盖二进制并重启即可。
+    v2.0 的插件入口是单参写法 `sdk.Serve(plugin{})`，v2.1 会在加载时自动改写成双参。
+    但这个改写只放在手动加载（`Load`）里，**启动预加载与调用时自动拉起走的是另一条路径**，
+    于是升级后第一次启动就报类型错误，插件一直显示未加载。
+
+    * 入口改写下沉到 `start()`，预加载、健康检测拉起、手动加载、试加载全部覆盖
+    * 改写会写回源文件，新增互斥锁串行化，避免并发加载把同一文件交叉写入
+    * 补了 `EnsureLoaded` 路径的回归用例，旧插件升级后无需手工改代码
+
+    #### 预览不再经过服务器，视频可在线播放
+
+    * 图片与视频优先**直连上游 CDN**，本机只签名不改写字节；上游链接过期或缺失时自动回退本站签名直链
+    * 页面统一 `no-referrer`：防盗链的 CDN 也能正常加载图片与视频（`<video>` 不支持该属性，必须靠页面级策略）
+    * 直链带 `Accept-Ranges`，视频可以拖动进度条；实测 `206 Partial Content` 正常
+    * 上传列表按类型给操作：图片看大图、音视频直接播、其余下载；卡片悬停可复制直链 / 删除
+    * 图片相册改为**左图右文件信息**：桶、对象键、MIME、大小、来源、归档时间、签名到期、SHA-256、巡检状态与直链一屏可见
+
+    #### 新增：开放上传接口（一个 API Key + 直链）
+
+    ```bash
+    curl -X POST http://host:8080/api/open/upload -H 'X-API-Key: sk_…' -F 'file=@a.png'
+    ```
+
+    * 支持 multipart 与原始 body；`bucket` / `path` / `name` 参数可选，`path` 以 `/` 结尾视为目录
+    * 返回 `/f/{bucket}/{key}?e=&s=` 签名直链，默认 7 天有效，无需登录即可嵌入 `<img>` / `<video>` / Markdown
+    * 同键上传改为**覆盖**（此前会追加重复记录，直链读到旧对象）；S3 PutObject 同步修正
+    * 无密钥返回 401，桶不存在返回 404，不会凭空建桶
+
+    #### 新增：WebDAV 与 FTP
+
+    * **WebDAV**：挂在主服务同端口 `/dav/{bucket}/{key}`，支持 PROPFIND / GET / PUT / DELETE / MKCOL / MOVE / COPY / LOCK；
+      用户名随意、密码填 API Key，Finder / 资源管理器 / Cyberduck / rclone 可直接挂载
+    * **FTP**：默认 `:2121`，被动模式，支持 LIST / MLSD / RETR / STOR / DELE / MKD / RMD / SIZE / MDTM / RNFR+RNTO；
+      可配置被动端口范围与对外通告地址，便于 Docker/NAT 映射
+    * 两者都把 API Key 解析成用户身份，权限与后台一致；可在「系统设置 → 接入方式」开关
+
+    #### 其它
+
+    * **README 去掉 WorkBuddy 相关介绍**，换成对接 `example.com` 的最小插件示例（含 `plugin.json` 参数定义）
+    * 文档新增《接入方式：开放上传 / WebDAV / FTP》（`docs/interfaces.md`），文档中心与 MCP 资源同步为 7 份
+    * 修复空密钥列表返回 `null` 而不是 `[]`
+
+    > 从 v2.1.x 升级：覆盖二进制并重启即可，旧的 `sdk.Serve(plugin{})` 会在首次加载时自动改写。
+    > FTP 默认关闭；WebDAV 默认开启，不需要额外端口。
   footer: |
     ---
     **安装**：见 [安装与部署文档](https://github.com/Mr-losfer/s3bridge/blob/main/docs/installation.md)

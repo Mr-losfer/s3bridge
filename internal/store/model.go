@@ -212,6 +212,14 @@ type Object struct {
 	CreatedAt   time.Time    `json:"createdAt"`
 	// Validity 是图片有效性巡检结果（只对本地归档的图片有意义）。
 	Validity ObjectValidity `json:"validity,omitempty"`
+
+	// 以下字段由接口层按需计算，不写入 state.json：
+	// PreviewURL 是浏览器可直接加载的预览地址（优先上游直链，过期则回退本地）；
+	// PreviewNoReferer 表示该地址必须去掉 Referer 才能访问（第三方防盗链）；
+	// DirectPath 是本站签名直链 /f/{bucket}/{key}?e=&s=，支持 Range，供视频拖动。
+	PreviewURL       string `json:"previewUrl,omitempty"`
+	PreviewNoReferer bool   `json:"previewNoReferer,omitempty"`
+	DirectPath       string `json:"directPath,omitempty"`
 }
 
 // ObjectValidity 记录最近一次图片有效性巡检的结果。
@@ -345,6 +353,17 @@ type Settings struct {
 	ImageValidityEnabled       bool `json:"imageValidityEnabled"`
 	ImageValidityIntervalHours int  `json:"imageValidityIntervalHours"`
 	ImageValidityFailThreshold int  `json:"imageValidityFailThreshold"`
+
+	// 接入方式：WebDAV 与主服务同端口（/dav），FTP 独立端口。
+	// 两者都只认 API Key，不依赖登录会话。
+	WebDAVEnabled bool   `json:"webdavEnabled"`
+	FTPEnabled    bool   `json:"ftpEnabled"`
+	FTPAddr       string `json:"ftpAddr"`
+	// FTP 在 Docker/NAT 后需要固定被动端口与外部通告地址，否则客户端连不上数据端口。
+	FTPPassivePorts string `json:"ftpPassivePorts"`
+	FTPPublicIP     string `json:"ftpPublicIp"`
+	// OpenUploadBucket 是开放上传不指定 bucket 时的默认落点。
+	OpenUploadBucket string `json:"openUploadBucket"`
 }
 
 func DefaultSettings() Settings {
@@ -354,6 +373,8 @@ func DefaultSettings() Settings {
 		AlertOnFailure: true, UploadRetentionDays: 90,
 		ImageValidityEnabled: true, ImageValidityIntervalHours: 72,
 		ImageValidityFailThreshold: 2,
+		WebDAVEnabled:              true, FTPEnabled: false, FTPAddr: ":2121",
+		OpenUploadBucket: "default",
 	}
 }
 

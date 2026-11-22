@@ -8,11 +8,13 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/auth"
 	"github.com/Mr-losfer/s3bridge/internal/config"
+	"github.com/Mr-losfer/s3bridge/internal/ftp"
 	"github.com/Mr-losfer/s3bridge/internal/health"
 	"github.com/Mr-losfer/s3bridge/internal/obs"
 	"github.com/Mr-losfer/s3bridge/internal/plugin"
@@ -45,6 +47,10 @@ type Core struct {
 	StartedAt   time.Time
 
 	warm sync.WaitGroup // 插件预编译协程，Close 时等待，避免退出时留下半截产物
+
+	ftpMu      sync.Mutex
+	ftpSrv     *ftp.Server
+	ftpApplied string // 已生效的 FTP 配置（地址），避免每次改设置都重启
 }
 
 // New 构建核心依赖，并执行首次启动的引导（管理员、默认 bucket、内置插件）。
@@ -76,7 +82,7 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		return nil, fmt.Errorf("初始化插件: %w", err)
 	}
 
-	uploads := upload.New(st, mgr, cfg.ObjectDir, cfg.MaxUploadBytes)
+	uploads := upload.New(st, mgr, cfg.ObjectDir, cfg.MaxUploadBytes, cfg.MasterKey, 7*24*time.Hour)
 	s3gw := s3gateway.New(st, authSvc, uploads, cfg.ObjectDir, cfg.MaxUploadBytes, "us-east-1")
 
 	upd, err := updater.New(updater.Options{
@@ -109,6 +115,7 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		FailThreshold: vSettings.ImageValidityFailThreshold,
 		BaseURL:       validity.LoopbackBase(cfg.Addr), Secret: probeSeed[:],
 	})
+	_ = core.ApplyIntegrations()
 	// 监控是增强能力：初始化失败只降级，不影响上传与 S3 主链路。
 	if col, err := obs.New(obs.Options{Dir: cfg.ObsDir}); err == nil {
 		core.Obs = col
@@ -133,8 +140,62 @@ func (c *Core) WarmPlugins(ctx context.Context) {
 	}()
 }
 
+// ApplyIntegrations 按设置启动/停止 FTP 服务。WebDAV 挂在主 HTTP 端口上，
+// 由 API 层每次请求时读开关，不需要在这里处理。
+func (c *Core) ApplyIntegrations() error {
+	var set store.Settings
+	_ = c.Store.View(func(st *store.State) error { set = st.Settings; return nil })
+	want := ""
+	if set.FTPEnabled {
+		addr := set.FTPAddr
+		if addr == "" {
+			addr = ":2121"
+		}
+		want = addr + "|" + set.FTPPassivePorts + "|" + set.FTPPublicIP
+	}
+	c.ftpMu.Lock()
+	defer c.ftpMu.Unlock()
+	if want == c.ftpApplied {
+		return nil
+	}
+	if c.ftpSrv != nil {
+		_ = c.ftpSrv.Close()
+		c.ftpSrv = nil
+	}
+	c.ftpApplied = ""
+	if want == "" {
+		return nil
+	}
+	addr, rest, _ := strings.Cut(want, "|")
+	ports, ip, _ := strings.Cut(rest, "|")
+	srv := ftp.New(ftp.Options{
+		Addr: addr, Auth: c.Auth, Uploads: c.Uploads,
+		PassivePorts: ports, PublicIP: ip,
+	})
+	if err := srv.Start(); err != nil {
+		slog.Error("FTP 服务启动失败", "addr", want, "err", err)
+		return err
+	}
+	c.ftpSrv = srv
+	c.ftpApplied = want
+	return nil
+}
+
+// Settings 返回当前设置快照。
+func (c *Core) Settings() store.Settings {
+	var set store.Settings
+	_ = c.Store.View(func(st *store.State) error { set = st.Settings; return nil })
+	return set
+}
+
 // Close 停止后台 goroutine 并释放资源。
 func (c *Core) Close() error {
+	c.ftpMu.Lock()
+	if c.ftpSrv != nil {
+		_ = c.ftpSrv.Close()
+		c.ftpSrv = nil
+	}
+	c.ftpMu.Unlock()
 	if c.Validity != nil {
 		c.Validity.Stop()
 	}

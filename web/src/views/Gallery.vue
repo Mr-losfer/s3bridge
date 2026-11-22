@@ -2,9 +2,9 @@
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import {
   Images, LayoutGrid, Columns3, Loader2, Search, X, ChevronLeft, ChevronRight,
-  Download, Copy, ImageOff,
+  Download, Copy, ImageOff, Link2, Trash2, FileText,
 } from 'lucide-vue-next'
-import { api, getToken, downloadObject } from '../api'
+import { api, downloadObject } from '../api'
 import { notifyError, notify } from '../toast'
 import { formatBytes, relTime, fmtTime } from '../utils'
 import PageHeader from '../components/PageHeader.vue'
@@ -48,29 +48,25 @@ const masonryCols = computed(() => {
 const lightbox = ref(-1)
 const current = computed(() => (lightbox.value >= 0 ? items.value[lightbox.value] : null))
 
-// 灯箱大图同样需要 Bearer，因此走 blob 加载；切换图片时作废旧 URL 防止内存堆积。
+// 大图直连：优先上游直链（no-referrer），过期后回退本站签名直链。
+// 服务端不再把整张图读成 blob 转发，切换图片几乎没有等待。
 const boxSrc = ref('')
-const boxLoading = ref(false)
-let boxSeq = 0
-watch(current, async (cur) => {
-  boxLoading.value = true
-  boxSrc.value = ''
-  if (!cur) { boxLoading.value = false; return }
-  const seq = ++boxSeq
-  try {
-    const q = new URLSearchParams({ bucket: cur.bucket, key: cur.objectKey, w: '1600' })
-    const res = await fetch('/api/objects/thumb?' + q.toString(), {
-      headers: { Authorization: 'Bearer ' + getToken() },
-    })
-    if (!res.ok) throw new Error('HTTP ' + res.status)
-    const blob = await res.blob()
-    if (seq !== boxSeq) return
-    if (boxSrc.value) URL.revokeObjectURL(boxSrc.value)
-    boxSrc.value = URL.createObjectURL(blob)
-  } catch { /* 失败时保留占位，不打断浏览 */ } finally {
-    if (seq === boxSeq) boxLoading.value = false
-  }
+const boxError = ref('')
+const boxFallback = ref(false)
+watch(current, (cur) => {
+  boxError.value = ''
+  boxFallback.value = false
+  boxSrc.value = cur ? (cur.previewUrl || cur.directPath || '') : ''
 })
+function onBoxError() {
+  const cur = current.value
+  if (cur && cur.directPath && boxSrc.value !== cur.directPath) {
+    boxSrc.value = cur.directPath
+    boxFallback.value = true
+    return
+  }
+  boxError.value = '该图片无法预览，可下载原文件查看'
+}
 const hasMore = computed(() => !done.value && items.value.length < total.value)
 
 const rangeOptions = [
@@ -159,6 +155,32 @@ async function copyKey() {
     notify('已复制 S3 路径', { title: current.value.fileName })
   } catch { notifyError(new Error('浏览器未授权剪贴板')) }
 }
+async function copyDirect() {
+  const cur = current.value
+  if (!cur) return
+  try {
+    let path = cur.directPath
+    if (!path) {
+      const r = await api(`/link/sign?bucket=${encodeURIComponent(cur.bucket)}&key=${encodeURIComponent(cur.objectKey)}`)
+      path = r.directPath
+    }
+    await navigator.clipboard.writeText(window.location.origin + path)
+    notify('已复制直链（7 天有效）', { title: cur.fileName })
+  } catch { notifyError(new Error('生成直链失败')) }
+}
+async function removeCurrent() {
+  const cur = current.value
+  if (!cur) return
+  if (!window.confirm(`确认删除「${cur.fileName}」？该操作不可恢复。`)) return
+  try {
+    const q = new URLSearchParams({ bucket: cur.bucket, key: cur.objectKey })
+    await api('/objects?' + q.toString(), { method: 'DELETE' })
+    notify('已删除', { title: cur.fileName })
+    items.value = items.value.filter((o) => o.id !== cur.id)
+    total.value = Math.max(0, total.value - 1)
+    closeBox()
+  } catch (e) { notifyError(e, '删除失败') }
+}
 async function save() {
   if (!current.value) return
   try {
@@ -178,7 +200,6 @@ onUnmounted(() => {
   observer?.disconnect()
   document.body.style.overflow = ''
   clearTimeout(searchTimer)
-  if (boxSrc.value) URL.revokeObjectURL(boxSrc.value)
 })
 </script>
 
@@ -302,75 +323,117 @@ onUnmounted(() => {
       </Button>
     </Empty>
 
-    <!-- 灯箱 -->
+    <!-- 预览：左侧大图 + 右侧文件信息，信息密度与上传列表、桶列表一致 -->
     <Teleport to="body">
       <div
         v-if="current"
-        class="fixed inset-0 z-[70] flex flex-col bg-black/88 backdrop-blur-sm"
+        class="fixed inset-0 z-[70] flex flex-col bg-[oklch(0.13_0.004_60)] lg:grid lg:grid-cols-[minmax(0,1fr)_380px] lg:grid-rows-1"
         @click.self="closeBox"
       >
-        <div class="flex items-center gap-3 px-4 py-3 text-white/90">
-          <ImageOff v-if="!current.mimeType?.startsWith('image/')" class="size-4" />
-          <div class="min-w-0 flex-1">
-            <p class="truncate text-[13px] font-medium">{{ current.fileName }}</p>
-            <p class="mt-0.5 truncate font-mono text-[10.5px] text-white/50">{{ current.bucket }}/{{ current.objectKey }}</p>
-          </div>
-          <Button variant="ghost" class="text-white/80 hover:bg-white/10 hover:text-white" @click="save"><Download />下载</Button>
-          <Button variant="ghost" class="text-white/80 hover:bg-white/10 hover:text-white" @click="copyKey"><Copy />复制路径</Button>
-          <Button variant="ghost" size="icon" class="text-white/80 hover:bg-white/10 hover:text-white" aria-label="关闭" @click="closeBox">
-            <X />
-          </Button>
-        </div>
+        <div class="relative flex min-h-0 flex-1 items-center justify-center px-4 py-12 sm:px-12">
+          <button
+            class="absolute right-3 top-3 z-10 grid size-9 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white"
+            aria-label="关闭" @click="closeBox"
+          ><X class="size-4.5" /></button>
 
-        <div class="relative flex min-h-0 flex-1 items-center justify-center px-3 pb-3" @click.self="closeBox">
           <button
             v-if="lightbox > 0"
-            class="absolute left-2 z-10 grid size-9 place-items-center rounded-full bg-black/40 text-white/80 transition hover:bg-black/60 hover:text-white sm:left-4"
+            class="absolute left-2 top-1/2 z-10 grid size-9 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white sm:left-4"
             aria-label="上一张" @click="step(-1)"
-          >
-            <ChevronLeft class="size-5" />
-          </button>
+          ><ChevronLeft class="size-5" /></button>
+
+          <!-- 直连上游 CDN，配合全局 no-referrer 绕过防盗链；失败自动退回本站签名直链 -->
           <img
-            v-if="boxSrc"
+            v-if="boxSrc && !boxError"
             :key="current.id"
             :src="boxSrc"
             :alt="current.fileName"
+            referrerpolicy="no-referrer"
             class="max-h-full max-w-full rounded-lg object-contain shadow-2xl"
+            @error="onBoxError"
           />
-          <div v-else-if="boxLoading" class="flex flex-col items-center gap-2 text-white/60">
-            <Loader2 class="size-6 animate-spin" />
-            <span class="text-[11px]">加载大图…</span>
+          <div v-else class="flex max-w-xs flex-col items-center gap-2 px-4 text-center text-white/50">
+            <ImageOff class="size-8" />
+            <span class="text-[11.5px] leading-relaxed">{{ boxError || '该图片无法预览，可下载查看原文件' }}</span>
           </div>
-          <div v-else class="flex flex-col items-center gap-2 text-white/50">
-            <ImageOff class="size-7" />
-            <span class="text-[11px]">该图片无法预览，可下载查看原文件</span>
-          </div>
+
           <button
             v-if="lightbox < items.length - 1"
-            class="absolute right-2 z-10 grid size-9 place-items-center rounded-full bg-black/40 text-white/80 transition hover:bg-black/60 hover:text-white sm:right-4"
+            class="absolute right-2 top-1/2 z-10 grid size-9 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white/80 backdrop-blur transition-colors hover:bg-white/20 hover:text-white sm:right-4"
             aria-label="下一张" @click="step(1)"
-          >
-            <ChevronRight class="size-5" />
-          </button>
+          ><ChevronRight class="size-5" /></button>
+
+          <div class="absolute bottom-3 left-1/2 -translate-x-1/2 font-mono text-[10.5px] tracking-wide text-white/50">
+            {{ lightbox + 1 }} / {{ items.length }}
+          </div>
         </div>
 
-        <div class="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-white/10 px-4 py-2.5 text-[11px] text-white/60">
-          <span>{{ formatBytes(current.size) }}</span>
-          <span>{{ current.mimeType }}</span>
-          <span>{{ fmtTime(current.createdAt) }}</span>
-          <span v-if="current.pluginId">via {{ current.pluginId }}</span>
-          <span
-            v-if="current.validity?.status === 'invalid'"
-            class="inline-flex items-center gap-1 rounded bg-destructive/80 px-1.5 py-0.5 text-white"
-            :title="current.validity.error || ''"
-          >
-            <ImageOff class="size-3" />巡检失效 · {{ relTime(current.validity.checkedAt) }}
-          </span>
-          <span v-else-if="current.validity?.status === 'ok'" class="text-white/45">
-            巡检正常 · {{ relTime(current.validity.checkedAt) }}
-          </span>
-          <span class="ml-auto">{{ lightbox + 1 }} / {{ items.length }}</span>
-        </div>
+        <aside class="flex max-h-[46dvh] shrink-0 flex-col border-t border-white/10 bg-background lg:max-h-none lg:border-l lg:border-t-0">
+          <div class="border-b px-4 py-3">
+            <p class="text-[10px] font-medium tracking-[0.08em] text-muted-foreground">IMAGE DETAIL</p>
+            <h2 class="mt-1 break-words text-[15px] font-semibold leading-snug">{{ current.fileName }}</h2>
+            <p class="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+              <span>{{ current.mimeType }}</span><span>·</span>
+              <span>{{ formatBytes(current.size) }}</span><span>·</span>
+              <span>{{ relTime(current.createdAt) }}</span>
+              <span
+                v-if="current.validity?.status === 'invalid'"
+                class="inline-flex items-center gap-1 rounded bg-destructive/90 px-1.5 py-0.5 text-[10px] text-white"
+                :title="current.validity.error || ''"
+              ><ImageOff class="size-3" />巡检失效</span>
+            </p>
+          </div>
+
+          <div class="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+            <dl class="space-y-2 text-[11.5px]">
+              <div v-for="row in [
+                { k: '存储桶', v: current.bucket, mono: true },
+                { k: '对象键', v: current.objectKey, mono: true },
+                { k: 'MIME', v: current.mimeType, mono: true },
+                { k: '大小', v: current.size.toLocaleString() + ' 字节', mono: true },
+                { k: '来源', v: (current.pluginId || current.provider || '本地归档'), mono: true },
+                { k: '归档时间', v: fmtTime(current.createdAt), mono: false },
+                { k: '签名到期', v: current.urlExpireAt ? fmtTime(current.urlExpireAt) : '长期有效（本地归档）', mono: false },
+                { k: 'SHA-256', v: current.sha256 || '—', mono: true },
+                { k: '巡检', v: current.validity?.checkedAt ? (current.validity.status === 'ok' ? '正常' : '失效') + ' · ' + relTime(current.validity.checkedAt) : '未检测', mono: false },
+              ]" :key="row.k" class="grid grid-cols-[4.5rem_1fr] gap-2">
+                <dt class="text-muted-foreground">{{ row.k }}</dt>
+                <dd :class="['break-all', row.mono && 'font-mono text-[10.5px]']">{{ row.v }}</dd>
+              </div>
+            </dl>
+
+            <div class="mt-4 space-y-2 border-t pt-3">
+              <div>
+                <p class="flex items-center gap-1 text-[10.5px] text-muted-foreground">
+                  直链
+                  <span class="rounded bg-muted px-1 py-0.5 text-[9px]">
+                    {{ current.previewUrl && !boxFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range' }}
+                  </span>
+                </p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ current.directPath || '—' }}</p>
+              </div>
+              <div>
+                <p class="text-[10.5px] text-muted-foreground">第三方返回 URL</p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ current.remoteUrl || '—' }}</p>
+              </div>
+              <div>
+                <p class="text-[10.5px] text-muted-foreground">本地归档路径</p>
+                <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ current.localPath || '—' }}</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-2 border-t bg-muted/30 px-4 py-3">
+            <Button size="sm" @click="save"><Download />下载原文件</Button>
+            <Button size="sm" variant="outline" @click="copyDirect"><Link2 />复制直链</Button>
+            <Button size="sm" variant="ghost" @click="copyKey"><FileText />复制 S3 路径</Button>
+            <Button
+              size="sm" variant="ghost"
+              class="ml-auto text-destructive hover:bg-destructive/10 hover:text-destructive"
+              @click="removeCurrent"
+            ><Trash2 />删除</Button>
+          </div>
+        </aside>
       </div>
     </Teleport>
   </div>

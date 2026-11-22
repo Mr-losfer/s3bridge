@@ -355,7 +355,7 @@ func (g *Gateway) handleObject(ctx context.Context, w http.ResponseWriter, r *ht
 			Reader: body, FileName: fileName,
 			MimeType: r.Header.Get("Content-Type"),
 			Size:     -1, Bucket: bucket, ObjectKey: key,
-			OwnerID: p.UserID, IsAdmin: p.IsAdmin(),
+			OwnerID: p.UserID, IsAdmin: p.IsAdmin(), Overwrite: true,
 		})
 		if err != nil {
 			g.fail(w, http.StatusBadRequest, "InvalidRequest", err.Error(), requestID)

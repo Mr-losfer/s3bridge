@@ -7,8 +7,6 @@ package upload
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +34,15 @@ type Service struct {
 	mgr       *plugin.Manager
 	objectDir string
 	maxBytes  int64
+	links     *LinkSigner
 }
 
-func New(st store.Store, mgr *plugin.Manager, objectDir string, maxBytes int64) *Service {
-	return &Service{st: st, mgr: mgr, objectDir: objectDir, maxBytes: maxBytes}
+// New 创建上传服务。masterKey 用于签发对象直链，ttl 为直链有效期。
+func New(st store.Store, mgr *plugin.Manager, objectDir string, maxBytes int64, masterKey []byte, linkTTL time.Duration) *Service {
+	return &Service{
+		st: st, mgr: mgr, objectDir: objectDir, maxBytes: maxBytes,
+		links: NewLinkSigner(masterKey, linkTTL),
+	}
 }
 
 type PutRequest struct {
@@ -52,90 +55,47 @@ type PutRequest struct {
 	PluginID  string
 	OwnerID   string
 	IsAdmin   bool
+	// Overwrite 表示同 bucket+key 已存在时覆盖旧对象，而不是追加一条新记录。
+	// 开放上传、WebDAV/FTP 的 PUT 都要求覆盖语义。
+	Overwrite bool
 }
 
-// Put 完成一次聚合上传。
+// Put 完成一次聚合上传：落盘 → 调度插件 → 提交归档。
 func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error) {
-	bucket := strings.TrimSpace(req.Bucket)
-	if bucket == "" {
-		bucket = "default"
-	}
-	if err := ValidateBucketName(bucket); err != nil {
+	bucket, err := s.prepareBucket(req)
+	if err != nil {
 		return nil, err
 	}
-	if err := s.authorizeBucket(bucket, req.OwnerID, req.IsAdmin, store.PermUploadWrite); err != nil {
-		return nil, err
-	}
-
 	// 先落盘再判类型：MIME 嗅探需要文件头，插件调度依赖类型，
-	// 因此把「选插件」推迟到 category 计算之后。
-
-	// 1) 流式写入临时文件
-	tmp, err := os.CreateTemp(s.objectDir, ".upload-*")
+	// 因此把「选插件」推迟到 stage 之后。
+	st, err := s.stage(req)
 	if err != nil {
-		return nil, fmt.Errorf("创建临时文件: %w", err)
-	}
-	tmpName := tmp.Name()
-	// 插件是独立进程（工作目录为插件文件夹），必须给它绝对路径才能打开文件。
-	if abs, err := filepath.Abs(tmpName); err == nil {
-		tmpName = abs
-	}
-	defer func() { _ = os.Remove(tmpName) }()
-	hasher := sha256.New()
-	written, err := io.Copy(io.MultiWriter(tmp, hasher), io.LimitReader(req.Reader, s.maxBytes+1))
-	if err != nil {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("接收上传数据: %w", err)
-	}
-	if written > s.maxBytes {
-		_ = tmp.Close()
-		return nil, fmt.Errorf("%w: %d > %d 字节", ErrFileTooLarge, written, s.maxBytes)
-	}
-	if written == 0 {
-		_ = tmp.Close()
-		return nil, errors.New("文件内容为空")
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		_ = tmp.Close()
 		return nil, err
 	}
-	mimeType := strings.TrimSpace(req.MimeType)
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		mimeType = sniffMIME(tmp)
-	}
-	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
-		_ = tmp.Close()
-		return nil, err
-	}
-	digest := hex.EncodeToString(hasher.Sum(nil))
-	category := CategoryOf(mimeType, req.FileName)
+	defer st.cleanup()
 
 	// 按文件类型选择插件：显式指定时校验其承接能力，否则在同类插件中取权重最高者。
-	pluginID, err := s.mgr.Select(req.PluginID, category)
+	pluginID, err := s.mgr.Select(req.PluginID, st.category)
 	if err != nil {
-		_ = tmp.Close()
+		return nil, err
+	}
+	key, err := s.objectKey(req.ObjectKey, st)
+	if err != nil {
 		return nil, err
 	}
 
-	key := strings.TrimSpace(req.ObjectKey)
-	if key == "" {
-		// 桶内对象键同样按文件类型分组，让 S3 的 prefix 过滤与后台「按类型保存」直觉一致。
-		// bucket 由 S3 路径本身承载，不重复写进 key；磁盘归档路径见下方 rel。
-		key = fmt.Sprintf("%s/%s/%s_%s", string(category),
-			time.Now().UTC().Format("200601"), digest[:10], safeBase(req.FileName))
-	}
-	key, err = SanitizeKey(key)
+	// 插件以文件路径读取内容；重新打开而不是共用 stage 的句柄，
+	// 避免偏移量受嗅探影响。
+	f, err := os.Open(st.path)
 	if err != nil {
-		_ = tmp.Close()
-		return nil, err
+		return nil, fmt.Errorf("打开临时文件: %w", err)
 	}
+	defer f.Close()
 
-	// 2) 调用插件，转换为统一标准输出
 	result, err := s.mgr.Upload(ctx, pluginID, plugin.UploadRequest{
-		FileName: req.FileName, MimeType: mimeType, Size: written,
-		Reader: tmp, Path: tmpName, Bucket: bucket, ObjectKey: key, UserID: req.OwnerID,
+		FileName: req.FileName, MimeType: st.mimeType, Size: st.size,
+		Reader: f, Path: st.path, Bucket: bucket, ObjectKey: key, UserID: req.OwnerID,
 	})
-	_ = tmp.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -143,45 +103,33 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 		return nil, errors.New("插件未返回上传结果")
 	}
 
-	// 3) 提交到本地归档路径：{objectDir}/{bucket}/{category}/{yyyymm}/{hash}-{name}
-	rel := filepath.Join(bucket, string(category), time.Now().UTC().Format("200601"),
-		digest[:12]+"-"+safeBase(req.FileName))
-	finalPath := filepath.Join(s.objectDir, rel)
-	if !withinDir(s.objectDir, finalPath) {
-		return nil, errors.New("归档路径越界")
-	}
-	if err := os.MkdirAll(filepath.Dir(finalPath), 0o700); err != nil {
-		return nil, fmt.Errorf("创建归档目录: %w", err)
-	}
-	if err := os.Rename(tmpName, finalPath); err != nil {
-		return nil, fmt.Errorf("提交归档文件: %w", err)
-	}
-
-	obj := &store.Object{
-		ID: "obj_" + digest[:16], Bucket: bucket, ObjectKey: key,
-		FileName: pickString(req.FileName, result.FileName),
-		MimeType: pickString(mimeType, result.MimeType),
-		Category: category, Size: written, SHA256: digest,
-		Provider: result.Provider, PluginID: pluginID,
-		RemoteURL: result.URL, RemoteKey: result.ObjectKey,
-		URLExpireAt: result.URLExpireAt,
-		LocalPath:   rel, OwnerID: req.OwnerID, CreatedAt: store.NowUTC(),
-	}
-	if err := s.st.Update(func(st *store.State) error {
-		if store.BucketByName(st, bucket) == nil {
-			return ErrBucketMissing
-		}
-		st.Objects = append(st.Objects, *obj)
-		return nil
-	}); err != nil {
-		_ = os.Remove(finalPath)
-		return nil, err
-	}
-	return obj, nil
+	return s.commit(st, commitInfo{
+		bucket: bucket, key: key,
+		fileName: pickString(req.FileName, result.FileName),
+		mimeType: pickString(st.mimeType, result.MimeType),
+		category: st.category,
+		provider: result.Provider, pluginID: pluginID,
+		remoteURL: result.URL, remoteKey: result.ObjectKey,
+		expireAt: result.URLExpireAt, ownerID: req.OwnerID,
+		overwrite: req.Overwrite,
+	})
 }
 
 // Get 返回对象元数据与本地文件路径，供 S3 GetObject / 后台下载使用。
 func (s *Service) Get(bucket, key string, userID string, isAdmin bool) (*store.Object, string, error) {
+	obj, path, err := s.GetAny(bucket, key)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := s.authorizeBucket(bucket, userID, isAdmin, store.PermUploadRead); err != nil {
+		return nil, "", err
+	}
+	return obj, path, nil
+}
+
+// GetAny 读取对象，不做归属校验。调用方必须先完成鉴权：
+// 签名直链、公开读桶、WebDAV/FTP 的 API Key 会话都走这里。
+func (s *Service) GetAny(bucket, key string) (*store.Object, string, error) {
 	key, err := SanitizeKey(key)
 	if err != nil {
 		return nil, "", err
@@ -198,14 +146,41 @@ func (s *Service) Get(bucket, key string, userID string, isAdmin bool) (*store.O
 	if err != nil {
 		return nil, "", err
 	}
-	if err := s.authorizeBucket(bucket, userID, isAdmin, store.PermUploadRead); err != nil {
-		return nil, "", err
-	}
 	path := filepath.Join(s.objectDir, obj.LocalPath)
 	if !withinDir(s.objectDir, path) {
 		return nil, "", errors.New("对象路径越界")
 	}
+	s.Decorate(&obj)
 	return &obj, path, nil
+}
+
+// VerifyLink 校验签名直链；签名器未配置时恒为 false。
+func (s *Service) VerifyLink(bucket, key string, exp int64, sig string) bool {
+	return s.links != nil && s.links.Verify(bucket, key, exp, sig)
+}
+
+// PublicRead 报告存储桶是否允许匿名读取。
+func (s *Service) PublicRead(bucket string) bool {
+	var ok bool
+	_ = s.st.View(func(st *store.State) error {
+		if b := store.BucketByName(st, bucket); b != nil {
+			ok = b.PublicRead
+		}
+		return nil
+	})
+	return ok
+}
+
+// BucketNames 返回全部桶名，供 WebDAV/FTP 的根目录列举。
+func (s *Service) BucketNames() []string {
+	var out []string
+	_ = s.st.View(func(st *store.State) error {
+		for _, b := range st.Buckets {
+			out = append(out, b.Name)
+		}
+		return nil
+	})
+	return out
 }
 
 // ListFilter 支持按 bucket、文件类型、插件、用户、关键字过滤。
@@ -259,6 +234,7 @@ func (s *Service) List(f ListFilter) (ListResult, error) {
 				continue
 			}
 			res.Items = append(res.Items, o)
+			s.Decorate(&res.Items[len(res.Items)-1])
 		}
 		return nil
 	})

@@ -26,8 +26,19 @@ type galleryItem struct {
 	Height    int                  `json:"height,omitempty"`
 	OwnerID   string               `json:"ownerId,omitempty"`
 	PluginID  string               `json:"pluginId,omitempty"`
+	Provider  string               `json:"provider,omitempty"`
 	Validity  store.ObjectValidity `json:"validity"`
 	CreatedAt time.Time            `json:"createdAt"`
+
+	// 与上传列表保持同一套预览字段：优先上游直链（去 Referer），
+	// 否则走本站签名直链，浏览器可直连、不经过服务端转发字节。
+	RemoteURL        string `json:"remoteUrl,omitempty"`
+	URLExpireAt      string `json:"urlExpireAt,omitempty"`
+	SHA256           string `json:"sha256,omitempty"`
+	LocalPath        string `json:"localPath,omitempty"`
+	PreviewURL       string `json:"previewUrl,omitempty"`
+	PreviewNoReferer bool   `json:"previewNoReferer,omitempty"`
+	DirectPath       string `json:"directPath,omitempty"`
 }
 
 type galleryBucket struct {
@@ -102,11 +113,21 @@ func (s *Server) gallery(c *Ctx) error {
 			if len(items) >= limit {
 				continue
 			}
-			items = append(items, galleryItem{
+			view := o
+			s.core.Uploads.Decorate(&view)
+			item := galleryItem{
 				ID: o.ID, Bucket: o.Bucket, Key: o.ObjectKey, FileName: o.FileName,
 				MimeType: o.MimeType, Size: o.Size, Category: o.Category,
-				OwnerID: o.OwnerID, PluginID: o.PluginID, Validity: o.Validity, CreatedAt: o.CreatedAt,
-			})
+				OwnerID: o.OwnerID, PluginID: o.PluginID, Provider: o.Provider,
+				Validity: o.Validity, CreatedAt: o.CreatedAt,
+				RemoteURL: o.RemoteURL, SHA256: o.SHA256, LocalPath: o.LocalPath,
+				PreviewURL: view.PreviewURL, PreviewNoReferer: view.PreviewNoReferer,
+				DirectPath: view.DirectPath,
+			}
+			if o.URLExpireAt != nil {
+				item.URLExpireAt = o.URLExpireAt.Format(time.RFC3339)
+			}
+			items = append(items, item)
 		}
 		return nil
 	})

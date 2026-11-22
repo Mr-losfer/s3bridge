@@ -53,6 +53,7 @@ docker run -d --name s3bridge \
 | **临时参数** | 针对第三方会过期的 Bearer Token 等：标记 `Volatile` + 过期时间字段，到期前 24h 提醒、过期判定异常、支持一键从 JWT 解析 `exp` / `sub` |
 | **健康检测** | 每插件独立配置间隔 / 超时 / 失败阈值 / 探活模式，保存即重建调度；异常时**插件列表整行标红并置顶**、自动写告警、恢复自动销警 |
 | **上传聚合** | 后台图片上传测试（拖拽 + 进度）、统一标准输出、按 **bucket + 文件类型** 双维度归档、按类型/桶/插件/关键字过滤、图片预览与下载 |
+| **接入方式** | **开放上传**（一个 API Key 直传并返回直链）、**WebDAV**（`/dav/`，同一端口挂成网络盘）、**FTP**（被动模式，独立端口）；全部复用 API Key，权限与后台一致 |
 | **S3 接口** | SigV4 校验（含 Presigned URL）、`ListBuckets` / `PutObject` / `GetObject` / `HeadObject` / `DeleteObject` / `ListObjectsV2` / `CreateBucket`，标准 XML 响应与错误码 |
 | **多用户与权限** | RBAC 三角色 + 逐项授予/撤销；每用户独立 API Key（同时是 S3 凭据与 REST Bearer），支持作用域与有效期，可随时撤销 |
 | **存储桶** | 创建 / 编辑 / 公开读 / 删除，对象数与容量统计，与 S3 接口双向同步 |
@@ -61,7 +62,7 @@ docker run -d --name s3bridge \
 | **图片有效性巡检** | 本站归档图片默认 **72 小时（3 天）** 自检一次：只发 HEAD（不支持时退回 `Range: bytes=0-0`）判断「是否仍返回图片」，**绝不下载正文**；连续失败达阈值才标记失效并告警，相册与列表可见 |
 | **版本自更新** | 每 6 小时从本仓库 GitHub Releases 检测新版（**默认经 gh-proxy 加速，403/超时自动回退直连**）；首页卡片 + 新版本弹窗，更新要点按重要程度高亮；管理员点「立即更新」自动完成下载、SHA256 校验、备份、原子替换、原地重启与页面刷新，失败自动回滚 |
 | **MCP** | 53 个工具 + 6 个文档资源，stdio 与 Streamable HTTP 双通道；后台每个按钮都走同一份工具实现，AI 与人工操作结果/审计完全一致 |
-| **文档中心** | 插件开发、S3 接口、MCP、安装部署、监控中心、图片相册六份文档随二进制 embed，后台 / MCP / 仓库三处同源 |
+| **文档中心** | 插件开发、S3 接口、MCP、安装部署、监控中心、图片相册、接入方式七份文档随二进制 embed，后台 / MCP / 仓库三处同源 |
 
 ---
 
@@ -75,34 +76,101 @@ docker run -d --name s3bridge \
 | 插件开发 | **插件就是一个文件夹**（`plugin.json` + 多个 `.go`）：内嵌 Go 解释器直接执行源码，**不需要 Go 工具链，保存即生效**；任意请求/PUT/加解密；后台多文件编辑器与 Agent 的 `plugin_file_write` 同源 |
 | 告警中心 | 未确认优先，一键确认 |
 | 上传测试 | 拖拽上传、进度、统一标准输出与签名到期时间 |
-| 上传列表 | **图片网格流式视图 + 懒加载缩略图**，点击弹出「左图右数据」灯箱（键盘 ← → 切换）；按 bucket / 类型 / 插件 / 关键字筛选 |
+| 上传列表 | **图片网格流式视图 + 懒加载缩略图**；按类型给操作：图片看大图、音视频直接播（**no-referrer 直连上游、不经过服务端**）、其余下载；卡片悬停可复制直链/删除；「左图右数据」灯箱支持 ← → 切换 |
 | 监控中心 | 总览（请求/错误率/延迟分位曲线、慢接口与易错接口、运行时健康）、存储（桶健康分、类型分布、Top 大文件、重复、断链、孤儿、磁盘）、接口排行、**异常日志**（级别 + 7 类分类 + 关键字检索，20 秒自动刷新） |
-| 图片相册 | **全站图墙**，网格 / 瀑布流一键切换（记忆偏好）、时间 / 桶 / 关键字 / **有效性**筛选、失效图片角标、无限滚动、灯箱大图 |
+| 图片相册 | **全站图墙**，网格 / 瀑布流一键切换（记忆偏好）、时间 / 桶 / 关键字 / **有效性**筛选、失效图片角标、无限滚动；点开为**左图右文件信息**面板（与桶列表一致），预览直连 no-referrer，可复制直链/下载/删除 |
 | 存储桶 | 桶管理 + S3 接入示例 |
 | API 密钥 | 创建、随时查看明文、作用域、有效期、撤销、S3 接入点 |
 | MCP 能力 | **当前用户 API Key 明文 + 现成对接代码**、工具清单、在线调试台、Claude Desktop / Cursor 接入配置 |
-| 文档中心 | 六份文档在线渲染 |
+| 文档中心 | 七份文档在线渲染 |
 | 用户与权限 | 用户管理、角色默认权限、权限矩阵（额外授予 / 撤销） |
-| 系统设置 | 站点名、默认插件、健康检测总开关、告警开关、公告、修改密码 |
+| 系统设置 | 站点名、默认插件、健康检测总开关、告警开关、公告；**接入方式**（WebDAV / FTP 开关、FTP 监听地址、开放上传默认桶）；修改密码 |
 
 设计语言：工业实用风 / 编辑式排版，浅色暖白纸感 + 朱红告警，支持深浅主题，状态使用「颜色 + 形状 + 文字」三重编码。
 
 ---
 
-## 内置插件：WorkBuddy
+## 插件示例：对接 example.com
 
-完整实现了抓包报文中的开放上传接口：
+插件就是一个文件夹（`plugin.json` + 任意多个 `.go`），服务端内嵌 Go 解释器直接执行源码，
+保存即生效。下面这个最小示例把文件流式转发到 `example.com` 的上传接口：
 
+```go
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/Mr-losfer/s3bridge/sdk"
+)
+
+type plugin struct{}
+
+func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
+	f, err := os.Open(in.Path) // 文件已落盘，按需流式读取，不占内存
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	body, ctype := sdk.MultipartStream("file", in.FileName, in.MimeType, f, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg["upload_url"], body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", ctype)
+	req.Header.Set("Authorization", "Bearer "+cfg["token"])
+
+	res, err := sdk.NewClient(30 * time.Second).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	var out struct {
+		Data struct {
+			URL string `json:"url"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &sdk.Output{
+		URL:      out.Data.URL,
+		FileName: in.FileName,
+		MimeType: in.MimeType,
+		FileSize: in.Size,
+	}, nil
+}
+
+func (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }
+
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 ```
-POST https://copilot.tencent.com/v2/backgroundagent/localProxy/upload
-Content-Type: multipart/form-data
-Authorization: Bearer <JWT> · x-user-id · x-client-version · x-client-product
-x-client-platform · user-agent · cookie
+
+参数写在 `plugin.json` 里，后台自动渲染表单，标了 `sensitive` 的值加密存储：
+
+```json
+{
+  "schema": 2,
+  "id": "example",
+  "name": "example.com 上传",
+  "version": "1.0.0",
+  "entry": "main.go",
+  "params": [
+    { "key": "upload_url", "label": "上传地址", "type": "url",
+      "default": "https://api.example.com/v1/upload", "required": true },
+    { "key": "token", "label": "访问令牌", "type": "secret", "sensitive": true }
+  ]
+}
 ```
 
-响应 `data.url` / `data.objectKey` / `data.fileInfo` 映射为统一标准输出，并从 COS 签名参数 `q-sign-time` 解析出链接到期时间。
-
-**所有会变化的临时参数（Bearer Token、Token 过期时间、X-User-Id、Cookie）都在后台表单里配置**，不需要改代码；Token 可一键解析自动填好过期时间与用户 ID。开发自己的插件见 [插件开发文档](docs/plugin-development.md)。
+任意请求方法、多次请求、加解密都能写，也可以直接让 Agent 通过 MCP 工具写代码并试加载。
+完整约定见[插件开发文档](docs/plugin-development.md)。
 
 ---
 
@@ -120,7 +188,7 @@ x-client-platform · user-agent · cookie
   "category": "image",
   "size": 2033070,
   "sha256": "…",
-  "provider": "workbuddy",
+  "provider": "example",
   "remoteUrl": "https://…/83420.png?q-sign-algorithm=sha1&…",
   "urlExpireAt": "2026-12-08T12:00:00Z",
   "createdAt": "2026-11-08T23:58:31Z"
@@ -148,13 +216,22 @@ export AWS_SECRET_ACCESS_KEY=<明文>
 aws --endpoint-url http://localhost:8080/s3 s3 ls
 aws --endpoint-url http://localhost:8080/s3 s3 cp ./a.png s3://default/images/a.png
 
+# 开放上传：一个 API Key，返回可直连的直链
+curl -X POST http://localhost:8080/api/open/upload \
+  -H 'X-API-Key: sk_xxx' -F 'file=@./a.png'
+# → {"url":"http://localhost:8080/f/default/image/202611/xxxx-a.png?e=…&s=…", ...}
+
+# WebDAV：用户名随意，密码填 API Key
+#   http://localhost:8080/dav/
+# FTP：默认 :2121，同样用 API Key 作密码
+
 # MCP
 curl -X POST http://localhost:8080/mcp \
   -H 'Authorization: Bearer <TOKEN>' -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"site_info","arguments":{}}}'
 ```
 
-详见 [S3 开放接口文档](docs/s3-api.md) 与 [MCP 能力与工具清单](docs/mcp.md)。
+详见 [S3 开放接口文档](docs/s3-api.md)、[接入方式](docs/interfaces.md) 与 [MCP 能力与工具清单](docs/mcp.md)。
 
 ---
 
@@ -173,19 +250,20 @@ s3bridge/
 │   │   ├── sdk/           # 插件开发包（Input/Output/Client/加解密助手），插件源码 import 的就是它
 │   │   ├── engine/        # 内嵌 Go 解释器：多文件合并、导入白名单、入口改写、错误行号映射
 │   │   └── runtime/       # runner 子进程：启动/握手/超时强杀/空闲回收/热切换
-│   ├── plugins/workbuddy/ # WorkBuddy 插件实现
+│   ├── plugins/           # 内置插件源码（随二进制嵌入，首次启动落盘为普通插件）
 │   ├── health/            # 每插件独立定时检测调度器
 │   ├── updater/           # Releases 检测、更新要点解析、SHA256 校验与自动替换重启
 │   ├── upload/            # 统一上传、按类型与 bucket 归档
 │   ├── obs/               # 指标采集、事件日志、存储体检、缩略图缓存
 │   ├── s3gateway/         # SigV4 校验 + S3 REST 接口（XML）
+│   ├── ftp/               # 极简 FTP 服务（被动模式，API Key 登录）
 │   ├── mcp/               # JSON-RPC 协议 + 53 个工具
 │   ├── docs/              # 文档 embed（files/ 为 docs/ 的同步副本）
 │   ├── api/               # REST 路由、采集中间件、处理器
 │   ├── app/               # 依赖装配
 │   └── web/               # 前端 embed（dist/ 为构建产物，随仓库提交）
 ├── web/src/               # Vue 3 后台源码
-├── docs/                  # 六份正式文档（唯一源）
+├── docs/                  # 七份正式文档（唯一源）
 ├── deployments/           # Dockerfile / Compose / Caddyfile / systemd unit
 ├── .github/workflows/     # CI 与 Release 流水线
 ├── .goreleaser.yml        # 多平台打包

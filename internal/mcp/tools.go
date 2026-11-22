@@ -414,12 +414,23 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			if n := argInt(args, "imageValidityFailThreshold", 0); n >= 1 && n <= 10 {
 				st.Settings.ImageValidityFailThreshold = n
 			}
+			if v, ok := args["webdavEnabled"]; ok {
+				st.Settings.WebDAVEnabled = argBool(v, true)
+			}
+			if v, ok := args["ftpEnabled"]; ok {
+				st.Settings.FTPEnabled = argBool(v, false)
+			}
+			setStr("ftpAddr", &st.Settings.FTPAddr)
+			setStr("ftpPassivePorts", &st.Settings.FTPPassivePorts)
+			setStr("ftpPublicIp", &st.Settings.FTPPublicIP)
+			setStr("openUploadBucket", &st.Settings.OpenUploadBucket)
 			return nil
 		}); err != nil {
 			return fail(err)
 		}
 		var vset store.Settings
 		_ = c.Store.View(func(st *store.State) error { vset = st.Settings; return nil })
+		_ = c.ApplyIntegrations()
 		if c.Validity != nil {
 			c.Validity.Configure(vset.ImageValidityEnabled,
 				time.Duration(vset.ImageValidityIntervalHours)*time.Hour, vset.ImageValidityFailThreshold)
@@ -1198,7 +1209,7 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 		return ok(out)
 
 	case "apikey_list":
-		var keys []map[string]any
+		keys := []map[string]any{}
 		_ = c.Store.View(func(st *store.State) error {
 			for _, k := range st.APIKeys {
 				if p != nil && !p.IsAdmin() && k.UserID != p.UserID {
