@@ -285,7 +285,7 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec, actor string) (Vi
 			ID: id, Kind: id, Name: mf.Name, Description: mf.Description,
 			Version: mf.Version, Author: mf.Author, Enabled: spec.Enabled,
 			Priority: mf.Priority, FileTypes: types, Params: sealed,
-			Status: store.StatusUnknown, StatusMessage: "新建插件，等待加载",
+			Status: store.StatusUnknown, StatusMessage: "新建插件，尚未加载",
 			Health: store.HealthConfig{Enabled: true, IntervalSecs: 300, TimeoutSecs: 8, FailThreshold: 2, ProbeMode: "ping"},
 			Dir:    dir, ValidityHours: mf.Validity.IntervalHours, Custom: true,
 			Revision: 1, CreatedAt: now, UpdatedAt: now,

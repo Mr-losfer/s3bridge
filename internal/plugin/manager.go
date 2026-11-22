@@ -1051,9 +1051,11 @@ func (m *Manager) setBuildState(id string, res *runtime.LoadResult, err error) {
 			p.BuildError = ""
 			p.BuiltAt = &now
 			p.BuildSHA = res.SHA256
-			if p.Status == store.StatusUnhealthy {
+			// 加载成功即可用，但健康状态要等下一次探测才有结论：
+			// 停用中的插件保留停用原因，已健康的保留结论，其余一律回落到「等待检测」。
+			if p.Status != store.StatusDisabled && p.Status != store.StatusHealthy {
 				p.Status = store.StatusUnknown
-				p.StatusMessage = "加载成功，等待健康检测"
+				p.StatusMessage = "已加载，等待健康检测"
 			}
 		}
 		p.UpdatedAt = now

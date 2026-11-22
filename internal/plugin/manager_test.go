@@ -197,6 +197,56 @@ func TestCreateRejectsDuplicate(t *testing.T) {
 	}
 }
 
+// TestBuildRefreshesStatusMessage 盯住一个容易漏掉的状态刷新：
+// 新建插件的状态是「新建插件，尚未加载」，加载成功后如果只改 BuildSHA 而不改消息，
+// 界面上会一直显示「尚未加载」，用户以为没生效。
+func TestBuildRefreshesStatusMessage(t *testing.T) {
+	m, st := newManager(t, nil)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, CreateSpec{ID: "state-up", Name: "状态刷新", Template: "blank"}, "tester"); err != nil {
+		t.Fatalf("创建失败: %v", err)
+	}
+	statusOf := func() store.Plugin {
+		var p store.Plugin
+		_ = st.View(func(s *store.State) error {
+			if cur := store.PluginByID(s, "state-up"); cur != nil {
+				p = *cur
+			}
+			return nil
+		})
+		return p
+	}
+	if p := statusOf(); p.BuildSHA == "" {
+		t.Fatalf("创建后应立即加载成功，实际 %+v", p)
+	}
+	if p := statusOf(); p.StatusMessage != "已加载，等待健康检测" {
+		t.Fatalf("加载成功后状态消息应刷新，实际 %q", p.StatusMessage)
+	}
+
+	// 写入坏源码：应转为异常并写明原因，源码保留（写文件成功，加载失败体现在 report 里）。
+	bad := "package main\n\nfunc main() { sdk.Serve() }\n"
+	if _, report, err := m.FilePut(ctx, "state-up", "main.go", bad, "tester"); err != nil || report == nil || report.OK {
+		t.Fatalf("缺少 import 的源码应加载失败，实际 err=%v report=%+v", err, report)
+	}
+	if p := statusOf(); p.Status != store.StatusUnhealthy || !strings.Contains(p.StatusMessage, "加载失败") {
+		t.Fatalf("加载失败应标记异常并说明原因，实际 %s / %q", p.Status, p.StatusMessage)
+	}
+
+	// 改回可运行的源码：应回到「已加载」，BuildError 清空。
+	good := "package main\n\nimport (\n\t\"context\"\n\n\t\"github.com/Mr-losfer/s3bridge/sdk\"\n)\n\n" +
+		"type plugin struct{}\n\n" +
+		"func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {\n" +
+		"\treturn &sdk.Output{URL: \"https://example.com/a.png\"}, nil\n}\n\n" +
+		"func (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }\n\n" +
+		"func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }\n"
+	if _, report, err := m.FilePut(ctx, "state-up", "main.go", good, "tester"); err != nil || report == nil || !report.OK {
+		t.Fatalf("修复后应加载成功: err=%v report=%+v", err, report)
+	}
+	if p := statusOf(); p.BuildError != "" || p.Status != store.StatusUnknown {
+		t.Fatalf("修复后应回到等待检测状态，实际 %s / %q", p.Status, p.BuildError)
+	}
+}
+
 // TestViewKeepsParamsWhenDisabled 盯住一个数据丢失陷阱：
 // 插件停用后视图曾把参数清空，用户再打开表单看到一片空白，随手保存就把配置抹了。
 func TestViewKeepsParamsWhenDisabled(t *testing.T) {

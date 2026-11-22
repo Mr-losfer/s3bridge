@@ -441,7 +441,7 @@ function switchTab(t) {
         </div>
         <PluginSource
           :id="id" :editable="!!view?.editable" :built="!!view?.built"
-          :toolchain="view?.toolchain !== false" :build-error="view?.buildError || ''"
+          :build-error="view?.buildError || ''"
           @changed="load"
         />
         <div class="mt-4 flex flex-wrap items-center gap-2">

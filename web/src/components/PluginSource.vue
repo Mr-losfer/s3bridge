@@ -20,7 +20,6 @@ const props = defineProps({
   id: { type: String, required: true },
   editable: { type: Boolean, default: false },
   built: { type: Boolean, default: false },
-  toolchain: { type: Boolean, default: true },
   buildError: { type: String, default: '' },
 })
 const emit = defineEmits(['changed'])
@@ -211,7 +210,7 @@ onMounted(() => loadFiles())
           <Button size="icon" class="size-8 shrink-0" aria-label="新增文件" :disabled="!newName.trim()" @click="createFile"><Plus /></Button>
         </div>
         <div class="flex flex-wrap gap-1.5">
-          <Button size="sm" variant="outline" class="flex-1" :disabled="building || !toolchain" @click="build">
+          <Button size="sm" variant="outline" class="flex-1" :disabled="building" @click="build">
             <Loader2 v-if="building" class="animate-spin" /><Hammer v-else />重新加载
           </Button>
           <Button size="sm" variant="ghost" @click="loadFiles(active)"><RotateCw /></Button>
@@ -270,7 +269,7 @@ onMounted(() => loadFiles())
           </div>
         </div>
         <div v-if="report.sha256" class="border-b px-3.5 py-1.5 font-mono text-[10px] text-muted-foreground">sha256 {{ report.sha256 }}</div>
-        <CodeBlock v-if="report.output" :code="report.output" label="go build" max-height="240px" />
+        <CodeBlock v-if="report.output" :code="report.output" label="engine" max-height="240px" />
         <p v-else class="px-3.5 py-3 text-[11.5px] text-muted-foreground">源码已加载，入口已注册，可以直接调用。</p>
       </Card>
 
