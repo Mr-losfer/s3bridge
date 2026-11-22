@@ -85,53 +85,35 @@ release:
   prerelease: auto
   name_template: "S3Bridge {{ .Version }}"
   header: |
-    ### 修复旧插件加载 + 三种新的接入方式
+    ### v2.2.1：升级迁移修复
 
-    #### 修复：升级后 WorkBuddy 插件报「cannot use type main.plugin as type sdk.UploadFunc」
+    一个小时的补丁版本，只修 v2.2.0 升级路径上的两个问题，功能与接口没有变化。
 
-    v2.0 的插件入口是单参写法 `sdk.Serve(plugin{})`，v2.1 会在加载时自动改写成双参。
-    但这个改写只放在手动加载（`Load`）里，**启动预加载与调用时自动拉起走的是另一条路径**，
-    于是升级后第一次启动就报类型错误，插件一直显示未加载。
+    #### 修复：从 v2.1.x 升级后「接入方式」设置丢失
 
-    * 入口改写下沉到 `start()`，预加载、健康检测拉起、手动加载、试加载全部覆盖
-    * 改写会写回源文件，新增互斥锁串行化，避免并发加载把同一文件交叉写入
-    * 补了 `EnsureLoaded` 路径的回归用例，旧插件升级后无需手工改代码
+    v2.2.0 新增了 WebDAV / FTP / 开放上传三组设置字段，但老版本写下的 `state.json` 里没有这些键。
+    直接读出来就是零值，结果是升级后 **WebDAV 静默变关闭、FTP 监听地址为空、开放上传没有默认桶**——
+    后台「接入方式」卡片看着正常，实际连不上。
 
-    #### 预览不再经过服务器，视频可在线播放
+    * `store.Open` 末尾补迁移：用 `OpenUploadBucket` 是否为空判断是否为旧状态文件，一次性补齐默认值
+    * WebDAV 恢复为默认开启、FTP 监听地址回填 `:2121`、开放上传默认桶回填 `default`
+    * 迁移只跑一次：之后用户在界面上主动关掉 WebDAV 不会被重新打开（已有状态文件不再命中标记）
+    * 补 `TestOpenMigratesIntegrationSettings` 覆盖「旧文件补默认值」与「新文件不被改动」两条路径
 
-    * 图片与视频优先**直连上游 CDN**，本机只签名不改写字节；上游链接过期或缺失时自动回退本站签名直链
-    * 页面统一 `no-referrer`：防盗链的 CDN 也能正常加载图片与视频（`<video>` 不支持该属性，必须靠页面级策略）
-    * 直链带 `Accept-Ranges`，视频可以拖动进度条；实测 `206 Partial Content` 正常
-    * 上传列表按类型给操作：图片看大图、音视频直接播、其余下载；卡片悬停可复制直链 / 删除
-    * 图片相册改为**左图右文件信息**：桶、对象键、MIME、大小、来源、归档时间、签名到期、SHA-256、巡检状态与直链一屏可见
+    #### 修复：WebDAV 请求不存在的桶
 
-    #### 新增：开放上传接口（一个 API Key + 直链）
+    `PROPFIND /dav/没这个桶/` 此前会走到对象查询分支并返回一个空目录，客户端会显示为「空文件夹」而不是报错，
+    容易误以为数据丢了。
 
-    ```bash
-    curl -X POST http://host:8080/api/open/upload -H 'X-API-Key: sk_…' -F 'file=@a.png'
-    ```
-
-    * 支持 multipart 与原始 body；`bucket` / `path` / `name` 参数可选，`path` 以 `/` 结尾视为目录
-    * 返回 `/f/{bucket}/{key}?e=&s=` 签名直链，默认 7 天有效，无需登录即可嵌入 `<img>` / `<video>` / Markdown
-    * 同键上传改为**覆盖**（此前会追加重复记录，直链读到旧对象）；S3 PutObject 同步修正
-    * 无密钥返回 401，桶不存在返回 404，不会凭空建桶
-
-    #### 新增：WebDAV 与 FTP
-
-    * **WebDAV**：挂在主服务同端口 `/dav/{bucket}/{key}`，支持 PROPFIND / GET / PUT / DELETE / MKCOL / MOVE / COPY / LOCK；
-      用户名随意、密码填 API Key，Finder / 资源管理器 / Cyberduck / rclone 可直接挂载
-    * **FTP**：默认 `:2121`，被动模式，支持 LIST / MLSD / RETR / STOR / DELE / MKD / RMD / SIZE / MDTM / RNFR+RNTO；
-      可配置被动端口范围与对外通告地址，便于 Docker/NAT 映射
-    * 两者都把 API Key 解析成用户身份，权限与后台一致；可在「系统设置 → 接入方式」开关
+    * 先做桶存在性校验，不存在直接 `404`；`MKCOL` 新建桶、上传到不存在的桶仍然返回 404，不会凭空建桶
 
     #### 其它
 
-    * **README 去掉 WorkBuddy 相关介绍**，换成对接 `example.com` 的最小插件示例（含 `plugin.json` 参数定义）
-    * 文档新增《接入方式：开放上传 / WebDAV / FTP》（`docs/interfaces.md`），文档中心与 MCP 资源同步为 7 份
-    * 修复空密钥列表返回 `null` 而不是 `[]`
+    * 清理仓库里两个没有被 `index.html` 引用的历史前端产物（约 1.1 MB）
+    * 无 API 变更、无配置变更，v2.2.0 的开放上传 / WebDAV / FTP 用法完全不变
 
-    > 从 v2.1.x 升级：覆盖二进制并重启即可，旧的 `sdk.Serve(plugin{})` 会在首次加载时自动改写。
-    > FTP 默认关闭；WebDAV 默认开启，不需要额外端口。
+    > 从 v2.1.x 或 v2.2.0 升级：覆盖二进制并重启即可。首次启动会自动补齐接入方式设置。
+
   footer: |
     ---
     **安装**：见 [安装与部署文档](https://github.com/Mr-losfer/s3bridge/blob/main/docs/installation.md)
