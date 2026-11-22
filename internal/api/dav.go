@@ -297,6 +297,10 @@ func (s *Server) davPropfind(w http.ResponseWriter, r *http.Request, p *auth.Pri
 		}
 
 	default:
+		if !s.core.Uploads.BucketExists(bucket) {
+			http.Error(w, "存储桶不存在", http.StatusNotFound)
+			return
+		}
 		// 目录（桶根或对象键前缀）与文件分开处理：
 		// 目录没有实体，不能走 Get，否则会误报 404。
 		if key == "" || strings.HasSuffix(r.URL.Path, "/") {

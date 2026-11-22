@@ -171,6 +171,16 @@ func (s *Service) PublicRead(bucket string) bool {
 	return ok
 }
 
+// BucketExists 报告存储桶是否存在。
+func (s *Service) BucketExists(name string) bool {
+	var ok bool
+	_ = s.st.View(func(st *store.State) error {
+		ok = store.BucketByName(st, name) != nil
+		return nil
+	})
+	return ok
+}
+
 // BucketNames 返回全部桶名，供 WebDAV/FTP 的根目录列举。
 func (s *Service) BucketNames() []string {
 	var out []string
