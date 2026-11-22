@@ -67,6 +67,16 @@ func Open(path string) (*JSONStore, error) {
 	if s.state.Settings.ImageValidityFailThreshold <= 0 {
 		s.state.Settings.ImageValidityFailThreshold = 2
 	}
+	// 老状态文件没有接入方式字段。用 OpenUploadBucket 作为迁移标记：
+	// 它为空说明是 v2.2 之前的文件，补一次默认值（WebDAV 默认开启、FTP 端口默认）。
+	// 用户主动关掉 WebDAV 后 OpenUploadBucket 已有值，不会在下次启动被重新打开。
+	if s.state.Settings.OpenUploadBucket == "" {
+		s.state.Settings.OpenUploadBucket = "default"
+		s.state.Settings.WebDAVEnabled = true
+		if s.state.Settings.FTPAddr == "" {
+			s.state.Settings.FTPAddr = ":2121"
+		}
+	}
 	return s, nil
 }
 

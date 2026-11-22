@@ -159,3 +159,34 @@ func TestTrimKeepsStateBounded(t *testing.T) {
 		t.Fatalf("trim 后对象数 = %d, want %d", len(st.Objects), maxObjects)
 	}
 }
+
+// TestOpenMigratesIntegrationSettings 盯住升级路径：v2.2 之前的 state.json
+// 没有接入方式字段，升级后 WebDAV 应默认可用，而不是悄悄变成关闭状态。
+func TestOpenMigratesIntegrationSettings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	legacy := `{"settings":{"siteName":"Old","healthEnabled":true,
+		"imageValidityIntervalHours":72,"imageValidityFailThreshold":2}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.View(func(st *State) error {
+		if !st.Settings.WebDAVEnabled {
+			t.Error("升级后 WebDAV 应默认开启")
+		}
+		if st.Settings.OpenUploadBucket != "default" {
+			t.Errorf("开放上传默认桶异常: %q", st.Settings.OpenUploadBucket)
+		}
+		if st.Settings.FTPAddr != ":2121" {
+			t.Errorf("FTP 默认地址异常: %q", st.Settings.FTPAddr)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
