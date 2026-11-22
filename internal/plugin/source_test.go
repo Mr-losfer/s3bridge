@@ -79,12 +79,11 @@ func TestSourceFileLifecycle(t *testing.T) {
 	must(WriteSourceFile(dir, "helper.go", "package main\n"))
 	must(WriteSourceFile(dir, "README.md", "# hi"))
 	must(os.MkdirAll(filepath.Join(dir, ".build"), 0o700))
-	must(os.WriteFile(filepath.Join(dir, ".build", "plugin"), []byte("bin"), 0o600))
+	must(os.WriteFile(filepath.Join(dir, ".build", "stale"), []byte("bin"), 0o600))
 
 	mf := Manifest{Schema: ManifestSchema, ID: "p2", Name: "P2", Entry: "main.go"}
 	must(mf.Validate())
 	must(SaveManifest(dir, mf))
-	must(EnsureGoMod(dir, "p2", filepath.Join(t.TempDir(), "sdk")))
 
 	files, err := ListFiles(dir, mf)
 	must(err)
@@ -93,7 +92,7 @@ func TestSourceFileLifecycle(t *testing.T) {
 		names = append(names, f.Name)
 	}
 	// .build 目录被忽略，Go 文件排在前面。
-	if strings.Join(names, ",") != "helper.go,main.go,README.md,go.mod,plugin.json" {
+	if strings.Join(names, ",") != "helper.go,main.go,README.md,plugin.json" {
 		t.Fatalf("文件列表不符: %v", names)
 	}
 
@@ -145,33 +144,6 @@ func TestCheckLayout(t *testing.T) {
 	_ = WriteSourceFile(dir, "main.go", "package main\nfunc main() {}\n")
 	if err := CheckLayout(dir, mf); err != nil {
 		t.Fatalf("布局合法却报错: %v", err)
-	}
-}
-
-// TestEnsureGoMod 验证生成的模块文件指向落盘 SDK，且内容未变时不重写。
-func TestEnsureGoMod(t *testing.T) {
-	dir := newPluginDir(t, "p4")
-	sdkDir := filepath.Join(t.TempDir(), "sdk")
-	if err := EnsureGoMod(dir, "p4", sdkDir); err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(filepath.Join(dir, "go.mod"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := string(raw)
-	for _, want := range []string{"module s3bridge.plugin/p4", "go 1.21", "github.com/Mr-losfer/s3bridge/sdk", "replace"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("go.mod 缺少 %q:\n%s", want, body)
-		}
-	}
-	before, _ := os.Stat(filepath.Join(dir, "go.mod"))
-	if err := EnsureGoMod(dir, "p4", sdkDir); err != nil {
-		t.Fatal(err)
-	}
-	after, _ := os.Stat(filepath.Join(dir, "go.mod"))
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Fatal("内容一致时不应重写 go.mod（会触发无谓重新编译）")
 	}
 }
 

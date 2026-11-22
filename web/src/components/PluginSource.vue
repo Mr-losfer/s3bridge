@@ -83,9 +83,9 @@ async function save() {
     original.value = content.value
     report.value = r.build || null
     if (r.build && r.build.ok === false) {
-      notify('源码已保存，但编译失败：请按下方编译器输出修复', { title: active.value, type: 'error' })
+      notify('源码已保存，但加载失败：请按下方错误输出修复', { title: active.value, type: 'error' })
     } else {
-      notify('源码已保存并重新编译，立即生效', { title: active.value })
+      notify('源码已保存并重新加载，立即生效', { title: active.value })
     }
     await loadFiles(active.value)
     emit('changed', r.plugin)
@@ -97,20 +97,20 @@ async function build() {
   building.value = true
   try {
     report.value = await api(`/plugins/${encodeURIComponent(props.id)}/build`, { method: 'POST', body: {} })
-    if (report.value.ok) notify(`编译成功 · ${report.value.durationMs}ms · ${formatBytes(report.value.size)}`)
-    else notify('编译失败：请查看编译器输出', { type: 'error' })
+    if (report.value.ok) notify(`加载成功 · ${report.value.durationMs}ms · ${report.value.files || 1} 个文件`)
+    else notify('加载失败：请查看下方错误', { type: 'error' })
     emit('changed')
     await loadFiles(active.value)
-  } catch (e) { notifyError(e, '编译失败') }
+  } catch (e) { notifyError(e, '加载失败') }
   finally { building.value = false }
 }
 
 async function createFile() {
   const name = newName.value.trim()
   if (!name) return
-  // 新建 .go 时先写入最简骨架：空文件会立刻让编译失败，容易被误判为系统故障。
+  // 新建 .go 时先写入最简骨架：空文件会立刻让加载失败，容易被误判为系统故障。
   const seed = name.endsWith('.go')
-    ? `package main\n\n// ${name}：可在此实现辅助类型与函数，保存后自动参与编译。\n`
+    ? `package main\n\n// ${name}：可在此实现辅助类型与函数，保存后自动生效。\n`
     : name.endsWith('.md') ? `# ${name}\n` : ''
   try {
     await api(`/plugins/${encodeURIComponent(props.id)}/files/${encodeURIComponent(name)}`, {
@@ -124,7 +124,7 @@ async function createFile() {
 }
 
 async function removeFile(f) {
-  if (!window.confirm(`删除文件 ${f.name}？删除后会立即重新编译。`)) return
+  if (!window.confirm(`删除文件 ${f.name}？删除后会立即重新加载。`)) return
   try {
     const r = await api(`/plugins/${encodeURIComponent(props.id)}/files/${encodeURIComponent(f.name)}`, { method: 'DELETE' })
     report.value = r.build || null
@@ -212,7 +212,7 @@ onMounted(() => loadFiles())
         </div>
         <div class="flex flex-wrap gap-1.5">
           <Button size="sm" variant="outline" class="flex-1" :disabled="building || !toolchain" @click="build">
-            <Loader2 v-if="building" class="animate-spin" /><Hammer v-else />重新编译
+            <Loader2 v-if="building" class="animate-spin" /><Hammer v-else />重新加载
           </Button>
           <Button size="sm" variant="ghost" @click="loadFiles(active)"><RotateCw /></Button>
         </div>
@@ -221,16 +221,10 @@ onMounted(() => loadFiles())
 
     <!-- 编辑器 -->
     <div class="min-w-0 space-y-3">
-      <div v-if="!toolchain" class="flex items-start gap-2 rounded-xl border border-warning/25 bg-warning/[0.07] p-3">
-        <CircleX class="mt-0.5 size-4 shrink-0 text-warning" />
-        <p class="text-[11.5px] leading-relaxed text-muted-foreground">
-          当前主机未安装 Go 工具链，只能运行已编译好的插件二进制。请安装 Go 1.21+ 后重启服务。
-        </p>
-      </div>
-      <div v-else-if="buildError" class="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/[0.05] p-3">
+      <div v-if="buildError" class="flex items-start gap-2 rounded-xl border border-destructive/25 bg-destructive/[0.05] p-3">
         <CircleX class="mt-0.5 size-4 shrink-0 text-destructive" />
         <div class="min-w-0">
-          <p class="text-[12px] font-medium text-destructive">最近一次编译失败</p>
+          <p class="text-[12px] font-medium text-destructive">最近一次加载失败</p>
           <pre class="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words font-mono text-[10.5px] leading-relaxed text-muted-foreground">{{ buildError }}</pre>
         </div>
       </div>
@@ -246,7 +240,7 @@ onMounted(() => loadFiles())
           <div class="flex items-center gap-1.5">
             <span class="hidden font-mono text-[10px] text-muted-foreground sm:inline">{{ relTime(current.modTime) }}</span>
             <Button v-if="current.editable" size="sm" :disabled="saving || !dirty" @click="save">
-              <Loader2 v-if="saving" class="animate-spin" /><Save v-else />保存并编译
+              <Loader2 v-if="saving" class="animate-spin" /><Save v-else />保存并生效
             </Button>
             <Button v-if="current.editable" size="icon" variant="ghost" aria-label="重命名" @click="renaming = current.name; renameTo = current.name">
               <Pencil />
@@ -266,7 +260,7 @@ onMounted(() => loadFiles())
 
       <Card v-if="report" class="overflow-hidden">
         <div class="flex flex-wrap items-center justify-between gap-2 border-b px-3.5 py-2.5">
-          <span class="text-[12.5px] font-medium">编译结果</span>
+          <span class="text-[12.5px] font-medium">加载结果</span>
           <div class="flex items-center gap-2">
             <Badge :variant="report.ok ? 'success' : 'destructive'">
               <component :is="report.ok ? CircleCheck : CircleX" class="mr-1 size-3" />{{ report.ok ? 'PASS' : 'FAIL' }}
@@ -277,7 +271,7 @@ onMounted(() => loadFiles())
         </div>
         <div v-if="report.sha256" class="border-b px-3.5 py-1.5 font-mono text-[10px] text-muted-foreground">sha256 {{ report.sha256 }}</div>
         <CodeBlock v-if="report.output" :code="report.output" label="go build" max-height="240px" />
-        <p v-else class="px-3.5 py-3 text-[11.5px] text-muted-foreground">编译器没有任何警告，产物已就绪。</p>
+        <p v-else class="px-3.5 py-3 text-[11.5px] text-muted-foreground">源码已加载，入口已注册，可以直接调用。</p>
       </Card>
 
       <div class="flex flex-wrap items-center gap-2">

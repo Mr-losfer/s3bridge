@@ -60,7 +60,7 @@ async function submit() {
 
         <div class="mt-10 grid gap-3">
           <div v-for="f in [
-            { icon: Layers, title: 'Go 插件', desc: '独立文件夹 + 运行时编译，任意协议自由实现' },
+            { icon: Layers, title: 'Go 插件', desc: '独立文件夹 + 内嵌解释器，在线编写保存即生效' },
             { icon: Database, title: 'S3 标准接口', desc: 'AWS SigV4，现有客户端零改造接入' },
             { icon: SquareTerminal, title: 'MCP 全掌控', desc: '53 个工具覆盖插件开发与运维' },
           ]" :key="f.title" class="flex items-center gap-3 text-white/75">

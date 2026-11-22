@@ -429,13 +429,13 @@ function switchTab(t) {
             <h2 class="text-sm font-semibold">插件源码</h2>
             <p class="mt-1 max-w-3xl text-[11.5px] leading-relaxed text-muted-foreground">
               插件是一个 Go 文件夹：<code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">plugin.json</code> 声明参数与元信息，
-              <code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">*.go</code> 实现上传逻辑。保存任意 .go 文件即自动编译并生效，
+              <code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">*.go</code> 实现上传逻辑。保存任意 .go 文件即自动加载并生效，
               与 MCP 的 plugin_files / plugin_file_write / plugin_build 完全同源。
             </p>
           </div>
           <div class="flex items-center gap-1.5">
             <Badge :variant="view?.editable ? 'success' : 'warning'">{{ view?.editable ? '可编辑' : '内置 · 源码只读' }}</Badge>
-            <Badge :variant="view?.built ? 'success' : 'outline'">{{ view?.built ? '已编译' : '未编译' }}</Badge>
+            <Badge :variant="view?.built ? 'success' : 'outline'">{{ view?.built ? '已加载' : '未加载' }}</Badge>
             <Badge variant="outline">rev {{ view?.revision }}</Badge>
           </div>
         </div>

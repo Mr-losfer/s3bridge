@@ -71,7 +71,7 @@ async function submitCreate() {
   try {
     const body = { ...createForm.value, id, priority: Number(createForm.value.priority) || 0, fileTypes: createForm.value.fileTypes }
     const r = await api('/plugins', { method: 'POST', body })
-    notify('插件已创建并编译完成，去详情页继续写源码', { title: id })
+    notify('插件已创建并加载完成，去详情页继续写源码', { title: id })
     createOpen.value = false
     await load()
     go('plugin', r.created || id)
@@ -321,7 +321,7 @@ async function saveHealth() {
     </Card>
 
     <!-- 创建插件 -->
-    <Sheet v-model:open="createOpen" title="创建 Go 插件" description="生成一个插件文件夹（plugin.json + main.go）并立即编译。之后可在详情页直接编辑 Go 源码，保存即生效。" class="max-w-2xl">
+    <Sheet v-model:open="createOpen" title="创建 Go 插件" description="生成一个插件文件夹（plugin.json + main.go）并立即加载。之后可在详情页直接编辑 Go 源码，保存即生效。" class="max-w-2xl">
       <div class="grid gap-4 sm:grid-cols-2">
         <Field label="插件 ID" required hint="全局唯一，小写字母开头，2-40 位，仅含小写字母/数字/下划线/连字符">
           <Input v-model="createForm.id" placeholder="例如 my-uploader" />
@@ -366,7 +366,7 @@ async function saveHealth() {
 
       <div class="mt-5 rounded-lg border border-primary/20 bg-primary/[0.04] p-3.5 text-[11.5px] leading-relaxed text-muted-foreground">
         插件是真正的 Go 程序：可以发起任意次请求、使用 PUT / 分片上传、做加解密与签名，不受模板限制。
-        创建后在详情页「插件源码」里编辑并保存即自动编译生效，也可以用 MCP 的
+        创建后在详情页「插件源码」里编辑并保存即自动生效，也可以用 MCP 的
         <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_file_write</code> /
         <code class="rounded border bg-background px-1 py-px font-mono text-[10.5px]">plugin_build</code> 由 Agent 全程开发。当前已有 {{ customCount }} 个自定义插件。
       </div>

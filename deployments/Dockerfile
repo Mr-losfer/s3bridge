@@ -18,7 +18,12 @@ RUN cd web && pnpm build
 # ---------- Stage 2: 后端 ----------
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine AS build
 WORKDIR /src
-COPY go.mod ./
+# 模块代理可覆盖：内网/受限网络构建时传 --build-arg GOPROXY=https://你的镜像,direct
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=${GOPROXY}
+# 依赖层单独缓存：go.mod/go.sum 没变时不必重下模块（目前只有内嵌解释器一个依赖）。
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
 # 用 Stage 1  freshly 构建的前端产物覆盖仓库内预构建产物
 COPY --from=web /src/internal/web/dist ./internal/web/dist
@@ -34,24 +39,20 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath \
       -o /out/s3bridge-mcp ./cmd/s3bridge-mcp
 
 # ---------- Stage 3: 运行 ----------
-# ARG WITH_GO=1 会在镜像内放入 Go 工具链（约 +300 MB），用于在线编辑/编译插件源码。
-# 发布流程同时产出两份镜像：
-#   ghcr.io/<owner>/s3bridge:<version>       精简版，只能运行已编译好的插件二进制
-#   ghcr.io/<owner>/s3bridge:<version>-go    含 Go 1.21+，支持后台改源码即时编译
+# 插件由内嵌解释器直接执行，镜像里不需要 Go 工具链。
 FROM alpine:3.20
-ARG WITH_GO=0
 RUN apk add --no-cache ca-certificates tzdata wget \
- && if [ "$WITH_GO" = "1" ]; then apk add --no-cache go; fi \
  && addgroup -S s3bridge \
  && adduser -S -G s3bridge s3bridge
 WORKDIR /app
 # 内置版本放 /app/bin；自更新版本放数据卷 /app/data/bin，由 entrypoint 优先加载。
-COPY --from=build /out/s3bridge /app/bin/s3bridge
-COPY --from=build /out/s3bridge-mcp /app/bin/s3bridge-mcp
-COPY deployments/entrypoint.sh /app/entrypoint.sh
+# --chown/--chmod 直接写在 COPY 上：若改用 RUN chown -R，overlayfs 会把 19MB 的二进制
+# 整份复制进新层，镜像直接翻倍。
+COPY --from=build --chown=s3bridge:s3bridge --chmod=0755 /out/s3bridge /app/bin/s3bridge
+COPY --from=build --chown=s3bridge:s3bridge --chmod=0755 /out/s3bridge-mcp /app/bin/s3bridge-mcp
+COPY --chown=s3bridge:s3bridge --chmod=0755 deployments/entrypoint.sh /app/entrypoint.sh
 RUN mkdir -p /app/data/bin \
- && chmod 0755 /app/entrypoint.sh /app/bin/s3bridge /app/bin/s3bridge-mcp \
- && chown -R s3bridge:s3bridge /app
+ && chown -R s3bridge:s3bridge /app/data
 USER s3bridge
 ENV S3BRIDGE_ADDR=:8080 \
     S3BRIDGE_DATA_DIR=/app/data \

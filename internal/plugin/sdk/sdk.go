@@ -1,14 +1,19 @@
 // Package sdk 是 S3Bridge Go 插件的开发包。
 //
-// 插件是独立的 Go 程序：一个文件夹内有 plugin.json（元信息与参数 Schema）
-// 和任意多个 .go 文件，编译后由主服务以子进程方式调用。插件拥有完整 Go 能力：
-// 任意次 HTTP 请求、任意方法（PUT/DELETE/multipart）、任意加解密与编码。
+// 插件是一个文件夹：plugin.json（元信息与参数 Schema）+ 任意多个 .go 文件。
+// 服务端内嵌 Go 解释器直接执行源码，**不需要安装 Go 工具链**，保存即生效。
+// 插件拥有完整的标准库能力：任意次 HTTP 请求、任意方法（PUT/DELETE/multipart）、
+// 任意加解密与编码。
 //
 // 最小插件：
 //
 //	package main
 //
-//	import "github.com/Mr-losfer/s3bridge/sdk"
+//	import (
+//		"context"
+//
+//		"github.com/Mr-losfer/s3bridge/sdk"
+//	)
 //
 //	type plugin struct{}
 //
@@ -18,21 +23,20 @@
 //
 //	func (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }
 //
-//	func main() { sdk.Serve(plugin{}) }
+//	func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
+//
+// 入口约定：main 里调用 sdk.Serve 把两个函数交给宿主。之所以传函数而不是实例，
+// 是因为解释器与宿主分属两套类型系统，函数值可以无损跨边界，接口值不行。
 package sdk
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
-	"fmt"
-	"os"
 	"sync"
 	"time"
 )
 
-// Version 是协议版本。主服务与 SDK 的大版本必须一致。
-const Version = "2"
+// Version 是插件入口约定版本。宿主加载时会检查，不匹配会提示迁移。
+const Version = "3"
 
 // Config 是后台配置的参数集合（敏感值已由主服务解密后传入）。
 type Config map[string]string
@@ -60,15 +64,41 @@ type Output struct {
 	Extra       map[string]any `json:"extra,omitempty"`
 }
 
-// Uploader 是插件必须实现的接口。
-type Uploader interface {
-	// Upload 把文件转发到第三方并返回统一结果。
-	Upload(ctx context.Context, in Input, cfg Config) (*Output, error)
-	// Check 做无副作用探活（不得上传真实业务文件）。
-	Check(ctx context.Context, cfg Config) error
+// UploadFunc 是上传实现的签名，插件方法可直接传入。
+type UploadFunc func(ctx context.Context, in Input, cfg Config) (*Output, error)
+
+// CheckFunc 是探活实现的签名。
+type CheckFunc func(ctx context.Context, cfg Config) error
+
+var (
+	regMu     sync.RWMutex
+	regUpload UploadFunc
+	regCheck  CheckFunc
+)
+
+// Serve 注册插件实现。宿主在解释执行完 main 后通过 Handlers 取回。
+func Serve(upload UploadFunc, check CheckFunc) {
+	regMu.Lock()
+	regUpload, regCheck = upload, check
+	regMu.Unlock()
 }
 
-// Request / Response 是子进程通信协议（每行一条 JSON）。
+// Reset 清空已注册的实现。加载器在每次加载前调用，避免上一次加载残留的
+// 函数被误当成新插件的入口（同一进程内连续校验多份源码时会遇到）。
+func Reset() {
+	regMu.Lock()
+	regUpload, regCheck = nil, nil
+	regMu.Unlock()
+}
+
+// Handlers 返回已注册的实现，供 runner 调用。
+func Handlers() (UploadFunc, CheckFunc) {
+	regMu.RLock()
+	defer regMu.RUnlock()
+	return regUpload, regCheck
+}
+
+// Request / Response 是宿主与 runner 子进程之间的通信协议（每行一条 JSON）。
 type Request struct {
 	ID          string            `json:"id"`
 	Method      string            `json:"method"`
@@ -79,14 +109,15 @@ type Request struct {
 }
 
 type Response struct {
-	ID      string   `json:"id"`
-	OK      bool     `json:"ok"`
-	Result  *Output  `json:"result,omitempty"`
-	Error   string   `json:"error,omitempty"`
-	Traces  []Trace  `json:"traces,omitempty"`
-	Pong    bool     `json:"pong,omitempty"`
-	Version string   `json:"version,omitempty"`
-	Notes   []string `json:"notes,omitempty"`
+	ID      string            `json:"id"`
+	OK      bool              `json:"ok"`
+	Result  *Output           `json:"result,omitempty"`
+	Error   string            `json:"error,omitempty"`
+	Traces  []Trace           `json:"traces,omitempty"`
+	Pong    bool              `json:"pong,omitempty"`
+	Version string            `json:"version,omitempty"`
+	Notes   []string          `json:"notes,omitempty"`
+	Meta    map[string]string `json:"meta,omitempty"`
 }
 
 // Trace 记录一次出站请求，供后台调试台与 plugin_debug 展示。
@@ -108,78 +139,20 @@ type Trace struct {
 // MaxTraces 限制单次调用的追踪条数，防止死循环插件撑爆响应。
 const MaxTraces = 64
 
-// Serve 启动插件主循环：从 stdin 读请求、向 stdout 写响应。
-// 日志务必写 stderr，stdout 只能输出协议消息，否则会破坏通信。
-func Serve(u Uploader) {
-	dec := json.NewDecoder(bufio.NewReaderSize(os.Stdin, 1<<20))
-	enc := json.NewEncoder(os.Stdout)
-	for {
-		var req Request
-		if err := dec.Decode(&req); err != nil {
-			return // EOF 或协议错误：主服务会重启进程
-		}
-		resp := handle(u, req)
-		if err := enc.Encode(resp); err != nil {
-			return
-		}
-	}
-}
-
-func handle(u Uploader, req Request) (resp Response) {
-	resp = Response{ID: req.ID, Version: Version}
-	defer func() {
-		if r := recover(); r != nil {
-			resp.OK = false
-			resp.Error = fmt.Sprintf("插件 panic: %v", r)
-		}
-	}()
-
-	timeout := time.Duration(req.TimeoutSecs) * time.Second
-	if timeout <= 0 || timeout > 10*time.Minute {
-		timeout = 60 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	col := &collector{}
-	ctx = withCollector(ctx, col)
-
-	switch req.Method {
-	case "ping":
-		resp.OK = true
-		resp.Pong = true
-		return resp
-	case "upload":
-		if req.Input == nil {
-			resp.Error = "缺少 input"
-			return resp
-		}
-		out, err := u.Upload(ctx, *req.Input, req.Config)
-		if err != nil {
-			resp.Error = err.Error()
-			return resp
-		}
-		resp.OK = true
-		resp.Result = out
-	case "check":
-		if err := u.Check(ctx, req.Config); err != nil {
-			resp.Error = err.Error()
-			return resp
-		}
-		resp.OK = true
-	default:
-		resp.Error = "未知方法: " + req.Method
-	}
-	resp.Traces = col.snapshot()
-	return resp
-}
-
-// collector 收集单次调用内的出站请求追踪。
-type collector struct {
+// Collector 收集单次调用内的出站请求追踪。
+//
+// 它通过 context 穿过解释器边界：Client 是宿主代码，读取的仍是同一个 ctx，
+// 所以插件里调用 sdk 客户端也能把请求记进当前这次调用的报告。
+type Collector struct {
 	mu     sync.Mutex
 	traces []Trace
 }
 
-func (c *collector) add(t Trace) {
+// NewCollector 创建一次调用的追踪收集器。
+func NewCollector() *Collector { return &Collector{} }
+
+// Add 记录一条追踪，超过上限后丢弃。
+func (c *Collector) Add(t Trace) {
 	if c == nil {
 		return
 	}
@@ -191,7 +164,8 @@ func (c *collector) add(t Trace) {
 	c.traces = append(c.traces, t)
 }
 
-func (c *collector) snapshot() []Trace {
+// Traces 返回追踪快照。
+func (c *Collector) Traces() []Trace {
 	if c == nil {
 		return nil
 	}
@@ -207,11 +181,13 @@ func (c *collector) snapshot() []Trace {
 
 type collectorKey struct{}
 
-func withCollector(ctx context.Context, c *collector) context.Context {
+// WithCollector 把收集器放进 context。
+func WithCollector(ctx context.Context, c *Collector) context.Context {
 	return context.WithValue(ctx, collectorKey{}, c)
 }
 
-func collectorFrom(ctx context.Context) *collector {
-	c, _ := ctx.Value(collectorKey{}).(*collector)
+// CollectorFrom 从 context 取出收集器，没有则返回 nil。
+func CollectorFrom(ctx context.Context) *Collector {
+	c, _ := ctx.Value(collectorKey{}).(*Collector)
 	return c
 }

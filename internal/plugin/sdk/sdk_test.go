@@ -2,7 +2,6 @@ package sdk
 
 import (
 	"context"
-	"errors"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -13,120 +12,53 @@ import (
 	"time"
 )
 
-type fakeUploader struct {
-	out  *Output
-	err  error
-	call func(ctx context.Context, cfg Config) error
-	boom bool
+// TestServeAndHandlers 验证注册式入口：Serve 存、Handlers 取、Reset 清空。
+func TestServeAndHandlers(t *testing.T) {
+	Reset()
+	if up, ck := Handlers(); up != nil || ck != nil {
+		t.Fatal("初始状态应为空")
+	}
+
+	var got string
+	up := func(ctx context.Context, in Input, cfg Config) (*Output, error) {
+		got = in.FileName
+		return &Output{URL: "https://cdn/x"}, nil
+	}
+	ck := func(ctx context.Context, cfg Config) error { return nil }
+	Serve(up, ck)
+
+	gotUp, gotCk := Handlers()
+	if gotUp == nil || gotCk == nil {
+		t.Fatal("Serve 后应能取回两个函数")
+	}
+	if _, err := gotUp(context.Background(), Input{FileName: "a.png"}, nil); err != nil {
+		t.Fatalf("调用失败: %v", err)
+	}
+	if got != "a.png" {
+		t.Fatalf("取回的函数不是注册的那个: %q", got)
+	}
+
+	Reset()
+	if up, ck := Handlers(); up != nil || ck != nil {
+		t.Fatal("Reset 后应清空")
+	}
 }
 
-func (f fakeUploader) Upload(ctx context.Context, in Input, cfg Config) (*Output, error) {
-	if f.boom {
-		panic("插件内部炸了")
+func TestCollectorLimit(t *testing.T) {
+	c := NewCollector()
+	for i := 0; i < MaxTraces+10; i++ {
+		c.Add(Trace{Method: http.MethodGet, URL: "https://x"})
 	}
-	if f.err != nil {
-		return nil, f.err
+	if n := len(c.Traces()); n != MaxTraces {
+		t.Fatalf("追踪应截断到 %d，实际 %d", MaxTraces, n)
 	}
-	if f.call != nil {
-		if err := f.call(ctx, cfg); err != nil {
-			return nil, err
-		}
+	var nilCol *Collector
+	nilCol.Add(Trace{}) // 不应 panic
+	if nilCol.Traces() != nil {
+		t.Fatal("nil 收集器应返回 nil")
 	}
-	return f.out, nil
-}
-
-func (f fakeUploader) Check(ctx context.Context, cfg Config) error {
-	if f.call != nil {
-		return f.call(ctx, cfg)
-	}
-	return f.err
-}
-
-// TestHandleProtocol 覆盖子进程协议：上传、自检、未知方法、panic 兜底与缺参。
-func TestHandleProtocol(t *testing.T) {
-	out := &Output{URL: "https://cdn.example.com/a.png", FileName: "a.png", FileSize: 7}
-
-	cases := []struct {
-		name     string
-		req      Request
-		up       Uploader
-		wantOK   bool
-		wantErr  string
-		wantURL  string
-		wantPong bool
-	}{
-		{
-			name:    "上传成功",
-			req:     Request{ID: "1", Method: "upload", Input: &Input{FileName: "a.png", Size: 7}},
-			up:      fakeUploader{out: out},
-			wantOK:  true,
-			wantURL: out.URL,
-		},
-		{
-			name:    "上传缺 input",
-			req:     Request{ID: "2", Method: "upload"},
-			up:      fakeUploader{out: out},
-			wantErr: "缺少 input",
-		},
-		{
-			name:    "上传报错透出原因",
-			req:     Request{ID: "3", Method: "upload", Input: &Input{}},
-			up:      fakeUploader{err: errors.New("上游 401")},
-			wantErr: "上游 401",
-		},
-		{
-			name:    "插件 panic 不拖垮进程",
-			req:     Request{ID: "4", Method: "upload", Input: &Input{}},
-			up:      fakeUploader{boom: true},
-			wantErr: "panic",
-		},
-		{
-			name:   "自检成功",
-			req:    Request{ID: "5", Method: "check"},
-			up:     fakeUploader{},
-			wantOK: true,
-		},
-		{
-			name:    "自检失败",
-			req:     Request{ID: "6", Method: "check"},
-			up:      fakeUploader{err: errors.New("探活失败")},
-			wantErr: "探活失败",
-		},
-		{
-			name:   "ping 握手",
-			req:    Request{ID: "7", Method: "ping"},
-			up:     fakeUploader{},
-			wantOK: true,
-			// ping 不需要业务实现，只回 pong
-			wantPong: true,
-		},
-		{
-			name:    "未知方法",
-			req:     Request{ID: "8", Method: "drop-table"},
-			up:      fakeUploader{},
-			wantErr: "未知方法",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			resp := handle(tc.up, tc.req)
-			if resp.ID != tc.req.ID || resp.Version != Version {
-				t.Fatalf("响应头不符: %+v", resp)
-			}
-			if resp.OK != tc.wantOK {
-				t.Fatalf("OK=%v want=%v (%s)", resp.OK, tc.wantOK, resp.Error)
-			}
-			if tc.wantErr != "" && !strings.Contains(resp.Error, tc.wantErr) {
-				t.Fatalf("错误信息 %q 未包含 %q", resp.Error, tc.wantErr)
-			}
-			if tc.wantURL != "" && (resp.Result == nil || resp.Result.URL != tc.wantURL) {
-				t.Fatalf("结果不符: %+v", resp.Result)
-			}
-			if resp.Pong != tc.wantPong {
-				t.Fatalf("pong=%v want=%v", resp.Pong, tc.wantPong)
-			}
-		})
+	if CollectorFrom(context.Background()) != nil {
+		t.Fatal("没有收集器的 context 应返回 nil")
 	}
 }
 
@@ -140,27 +72,27 @@ func TestTraceCollectedAndRedacted(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	up := fakeUploader{out: &Output{URL: "u"}, call: func(ctx context.Context, cfg Config) error {
-		c := NewClient(5 * time.Second)
-		// 第一次：带敏感头
-		if _, err := c.Bytes(ctx, http.MethodPut, srv.URL+"/put?token=abc&key=k", map[string]string{
-			"Authorization": "Bearer secret-token", "Content-Type": "text/plain",
-		}, []byte("hi")); err != nil {
-			return err
-		}
-		// 第二次：JSON
-		var out map[string]bool
-		_, err := c.JSON(ctx, http.MethodPost, srv.URL+"/json", nil, map[string]string{"a": "b"}, &out)
-		return err
-	}}
-	resp := handle(up, Request{ID: "t", Method: "upload", Input: &Input{FileName: "a.png"}, TimeoutSecs: 5})
-	if !resp.OK {
-		t.Fatalf("调用失败: %s", resp.Error)
+	col := NewCollector()
+	ctx := WithCollector(context.Background(), col)
+	c := NewClient(5 * time.Second)
+
+	// 第一次：带敏感头与敏感 query
+	if _, err := c.Bytes(ctx, http.MethodPut, srv.URL+"/put?token=abc&key=k", map[string]string{
+		"Authorization": "Bearer secret-token", "Content-Type": "text/plain",
+	}, []byte("hi")); err != nil {
+		t.Fatal(err)
 	}
-	if len(resp.Traces) != 2 {
-		t.Fatalf("应记录 2 次请求，实际 %d: %+v", len(resp.Traces), resp.Traces)
+	// 第二次：JSON
+	var out map[string]bool
+	if _, err := c.JSON(ctx, http.MethodPost, srv.URL+"/json", nil, map[string]string{"a": "b"}, &out); err != nil {
+		t.Fatal(err)
 	}
-	first := resp.Traces[0]
+
+	traces := col.Traces()
+	if len(traces) != 2 {
+		t.Fatalf("应记录 2 次请求，实际 %d: %+v", len(traces), traces)
+	}
+	first := traces[0]
 	if first.Method != http.MethodPut || first.Status != http.StatusOK || first.ReqBytes != 2 {
 		t.Fatalf("追踪字段不符: %+v", first)
 	}
@@ -173,8 +105,8 @@ func TestTraceCollectedAndRedacted(t *testing.T) {
 	if !strings.Contains(first.URL, "token=") {
 		t.Fatalf("脱敏后应保留参数名: %s", first.URL)
 	}
-	if resp.Traces[1].Method != http.MethodPost {
-		t.Fatalf("第二次请求未记录: %+v", resp.Traces[1])
+	if traces[1].Method != http.MethodPost {
+		t.Fatalf("第二次请求未记录: %+v", traces[1])
 	}
 	if len(paths) != 2 {
 		t.Fatalf("上游收到的请求数不符: %v", paths)

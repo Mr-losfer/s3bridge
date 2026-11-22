@@ -85,14 +85,14 @@ import "github.com/Mr-losfer/s3bridge/sdk"
 func traceID() string { return "v2-" + sdk.RandHex(4) }
 `
 
-// brokenHelper 故意漏掉右大括号：用来验证编译失败不会覆盖已就绪的产物，源码也不会被丢弃。
+// brokenHelper 故意漏掉右大括号：用来验证加载失败不会丢掉源码，错误能定位到文件。
 const brokenHelper = `package main
 
 func traceID() string { return "broken"
 `
 
 // TestPluginDevelopmentViaMCP 证明 Agent 只通过 MCP 即可完成 Go 插件的完整闭环：
-// 看内置插件文件 → 建插件（真编译）→ 多文件改写 → 编译失败与修复 → 改清单
+// 看内置插件文件 → 建插件（真加载）→ 多文件改写 → 加载失败与修复 → 改清单
 // → 配参数 → 调试看请求追踪（密钥脱敏）→ 真实上传 → 归档 → 导出 → 删除 → 审计。
 func TestPluginDevelopmentViaMCP(t *testing.T) {
 	var (
@@ -211,7 +211,7 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 		m := obj(f)
 		names[m["name"].(string)] = m
 	}
-	for _, want := range []string{"main.go", "plugin.json", "go.mod"} {
+	for _, want := range []string{"main.go", "plugin.json"} {
 		if names[want] == nil {
 			t.Fatalf("内置插件缺少文件 %s: %+v", want, names)
 		}
@@ -254,14 +254,14 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 	if types, ok := created["fileTypes"].([]any); !ok || len(types) != 2 || types[0] != "image" {
 		t.Fatalf("创建时文件类型未生效: %+v", created)
 	}
-	// 创建即编译：产物就绪后 built/buildSha 才有值。
+	// 创建即加载：入口注册成功后 built/buildSha 才有值。
 	_, out = mustOK("plugin_get", map[string]any{"id": "agent-up"})
 	detail := obj(out)
 	if detail["built"] != true || detail["buildError"] != nil && detail["buildError"] != "" {
-		t.Fatalf("插件创建后未编译成功: %+v", detail)
+		t.Fatalf("插件创建后未加载成功: %+v", detail)
 	}
 	if detail["editable"] != true || detail["toolchain"] != true {
-		t.Fatalf("自定义插件应可编辑且工具链可用: %+v", detail)
+		t.Fatalf("自定义插件应可编辑且执行引擎可用: %+v", detail)
 	}
 	if guarded, ok := detail["params"].(map[string]any); ok {
 		if guarded["token"] == "agent-token" {
@@ -269,24 +269,24 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 		}
 	}
 
-	// ---- 3. 多文件编译：把 helper.go 写坏 → 编译失败但源码保留 ----
+	// ---- 3. 多文件加载：把 helper.go 写坏 → 加载失败但源码保留 ----
 	_, out = mustOK("plugin_file_write", map[string]any{
 		"id": "agent-up", "name": "helper.go", "content": brokenHelper,
 	})
 	if br := obj(out)["build"].(map[string]any); br["ok"] != false || strings.TrimSpace(str(br["output"])) == "" {
-		t.Fatalf("语法错误应导致编译失败并给出编译器输出: %+v", br)
+		t.Fatalf("语法错误应导致加载失败并给出行号: %+v", br)
 	}
 	_, out = mustOK("plugin_file_read", map[string]any{"id": "agent-up", "name": "helper.go"})
 	if !strings.Contains(str(obj(out)["content"]), "broken") {
-		t.Fatal("编译失败后源码不应被丢弃")
+		t.Fatal("加载失败后源码不应被丢弃")
 	}
 
-	// 修复后立即重新编译成功，说明旧产物可用性不受影响。
+	// 修复后立即重新加载成功。
 	_, out = mustOK("plugin_file_write", map[string]any{
 		"id": "agent-up", "name": "helper.go", "content": helperSource,
 	})
 	if br := obj(out)["build"].(map[string]any); br["ok"] != true {
-		t.Fatalf("修复后应编译成功: %+v", br)
+		t.Fatalf("修复后应加载成功: %+v", br)
 	}
 
 	// ---- 4. 新增第三个文件并用 file_rename 改成入口不相关文件 ----
@@ -344,7 +344,7 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 		switch step["name"] {
 		case "参数校验":
 			sawParam = step["status"] == "pass"
-		case "编译产物":
+		case "插件加载":
 			sawBuild = step["status"] == "pass"
 		case "插件自检":
 			sawProbe = step["status"] == "pass"
@@ -385,7 +385,7 @@ func TestPluginDevelopmentViaMCP(t *testing.T) {
 		t.Fatalf("HMAC 签名不一致: got=%q want=%q", gotSign, want)
 	}
 	if !strings.HasPrefix(gotTrace, "v2-") {
-		t.Fatalf("helper.go 的改动未进入编译产物: trace=%q", gotTrace)
+		t.Fatalf("helper.go 的改动未生效: trace=%q", gotTrace)
 	}
 
 	// ---- 9. 归档可按插件过滤 ----

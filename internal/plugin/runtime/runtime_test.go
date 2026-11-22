@@ -4,25 +4,32 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/Mr-losfer/s3bridge/internal/plugin/engine"
 	"github.com/Mr-losfer/s3bridge/internal/plugin/sdk"
 )
 
-// testPlugin 是一个最小可用插件：读文件、回显输出，并支持「慢调用」分支用于验证超时杀进程。
-const testPlugin = `package main
+// TestMain 让测试二进制自己充当 runner：生产环境里 runner 是主程序，
+// 这样测试不必先构建一个可执行文件，也不依赖 Go 工具链。
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == "__plugin_runner__" {
+		if err := engine.Run(os.Args[2], os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+const rtPlugin = `package main
 
 import (
 	"context"
 	"fmt"
-	"os"
-	"time"
 
 	"github.com/Mr-losfer/s3bridge/sdk"
 )
@@ -31,289 +38,227 @@ type plugin struct{}
 
 func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
 	if cfg["fail"] == "1" {
-		return nil, fmt.Errorf("按参数失败")
+		return nil, fmt.Errorf("上游拒绝")
 	}
-	if cfg["mode"] == "slow" {
-		time.Sleep(5 * time.Second) // 故意忽略 ctx，验证运行时能强杀进程
-	}
-	data, err := os.ReadFile(in.Path)
-	if err != nil {
-		return nil, err
-	}
-	return &sdk.Output{
-		URL: "mem://" + in.FileName, FileName: in.FileName, FileSize: int64(len(data)),
-		Extra: map[string]any{"pid": os.Getpid()},
-	}, nil
+	return &sdk.Output{URL: "https://cdn.example.com/" + in.FileName, FileSize: in.Size}, nil
 }
 
 func (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }
 
-func main() { sdk.Serve(plugin{}) }
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 `
 
-// 每次编译都很贵：整个测试包共用一个运行时与 GOCACHE，靠不同插件 ID 隔离。
-var (
-	sharedOnce sync.Once
-	sharedRt   *Runtime
-	sharedRoot string
-	sharedErr  error
+const slowPlugin = `package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/Mr-losfer/s3bridge/sdk"
 )
 
-func TestMain(m *testing.M) {
-	code := m.Run()
-	if sharedRt != nil {
-		_ = sharedRt.Close()
-	}
-	if sharedRoot != "" {
-		_ = os.RemoveAll(sharedRoot)
-	}
-	os.Exit(code)
+type plugin struct{}
+
+func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
+	time.Sleep(10 * time.Second)
+	return &sdk.Output{URL: "https://slow"}, nil
 }
 
-func newTestRuntime(t *testing.T) *Runtime {
+func (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }
+
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
+`
+
+func newRuntime(t *testing.T) *Runtime {
 	t.Helper()
-	if _, err := exec.LookPath("go"); err != nil {
-		t.Skip("未安装 Go 工具链，跳过运行时测试")
-	}
-	if testing.Short() {
-		t.Skip("编译插件较慢，-short 模式下跳过")
-	}
-	sharedOnce.Do(func() {
-		root, err := os.MkdirTemp("", "s3bridge-runtime-")
-		if err != nil {
-			sharedErr = err
-			return
-		}
-		sharedRoot = root
-		sharedRt, sharedErr = New(Options{
-			PluginsDir:   filepath.Join(root, "plugins"),
-			CacheDir:     filepath.Join(root, "cache"),
-			BuildTimeout: 90 * time.Second,
-			IdleTimeout:  time.Minute,
-		})
+	dir := t.TempDir()
+	rt, err := New(Options{
+		PluginsDir:  filepath.Join(dir, "plugins"),
+		LoadTimeout: 10 * time.Second,
+		CallTimeout: 5 * time.Second,
+		IdleTimeout: time.Minute,
 	})
-	if sharedErr != nil {
-		t.Fatal(sharedErr)
+	if err != nil {
+		t.Fatal(err)
 	}
-	return sharedRt
+	t.Cleanup(func() { _ = rt.Close() })
+	return rt
 }
 
-// writePlugin 落盘一个可编译的插件目录（go.mod 指向运行时解出的 SDK）。
-func writePlugin(t *testing.T, rt *Runtime, id, source string) string {
+func writeSource(t *testing.T, rt *Runtime, id, src string) string {
 	t.Helper()
 	dir := filepath.Join(rt.Options().PluginsDir, id)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	gomod := "module s3bridge.plugin/" + id + "\n\ngo 1.21\n\n" +
-		"require github.com/Mr-losfer/s3bridge/sdk v0.0.0\n\n" +
-		"replace github.com/Mr-losfer/s3bridge/sdk => " + filepath.ToSlash(rt.SDKPath()) + "\n"
-	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte(gomod), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(source), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return dir
 }
 
-func writeFile(t *testing.T, name string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), name)
-	if err := os.WriteFile(path, []byte("DATA"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
+func TestLoadAndCall(t *testing.T) {
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "demo", rtPlugin)
 
-// TestBuildAndCall 覆盖「编译 → 子进程调用 → 复用进程」的主链路。
-func TestBuildAndCall(t *testing.T) {
-	rt := newTestRuntime(t)
-	dir := writePlugin(t, rt, "t1", testPlugin)
-
-	res, err := rt.Build(context.Background(), "t1", dir)
+	info, err := rt.Load(context.Background(), "demo", dir)
 	if err != nil {
-		t.Fatalf("编译失败: %v", err)
+		t.Fatalf("加载失败: %v", err)
 	}
-	if res.Size <= 0 || len(res.SHA256) != 64 {
-		t.Fatalf("编译结果异常: %+v", res)
+	if info.SHA256 == "" || info.Files != 1 || info.Entry != "main.go" {
+		t.Fatalf("加载结果不完整: %+v", info)
 	}
-	if res.Binary != BinaryPath(dir) {
-		t.Fatalf("产物路径不符: %s vs %s", res.Binary, BinaryPath(dir))
-	}
-	if runtime.GOOS == "windows" && !strings.HasSuffix(res.Binary, ".exe") {
-		t.Fatalf("Windows 产物应带 .exe: %s", res.Binary)
+	if info.DurationMs > 5000 {
+		t.Fatalf("解释器加载不应这么慢: %dms", info.DurationMs)
 	}
 
-	call := func(cfg sdk.Config, timeout int) (sdk.Response, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return rt.Call(ctx, "t1", dir, sdk.Request{
-			ID: "c1", Method: "upload", Config: cfg, TimeoutSecs: timeout,
-			Input: &sdk.Input{FileName: "a.png", MimeType: "image/png", Size: 4, Path: writeFile(t, "a.png")},
-		})
-	}
-
-	resp, err := call(sdk.Config{}, 5)
+	resp, err := rt.Call(context.Background(), "demo", dir, sdk.Request{
+		ID: "c1", Method: "upload", Input: &sdk.Input{FileName: "a.png", Size: 9},
+	})
 	if err != nil {
 		t.Fatalf("调用失败: %v", err)
 	}
-	if resp.Result == nil || resp.Result.FileName != "a.png" || resp.Result.FileSize != 4 {
-		t.Fatalf("返回结果不符: %+v", resp.Result)
-	}
-	firstPID := resp.Result.Extra["pid"]
-
-	// 第二次调用应复用同一个进程（不会因为重启导致 pid 变化）。
-	resp2, err := call(sdk.Config{}, 5)
-	if err != nil {
-		t.Fatalf("第二次调用失败: %v", err)
-	}
-	if resp2.Result.Extra["pid"] != firstPID {
-		t.Fatalf("进程未复用: %v → %v", firstPID, resp2.Result.Extra["pid"])
+	if resp.Result == nil || resp.Result.URL != "https://cdn.example.com/a.png" {
+		t.Fatalf("返回值不对: %+v", resp.Result)
 	}
 
-	// 业务错误必须原样透出，且不杀进程。
-	if _, err := call(sdk.Config{"fail": "1"}, 5); err == nil || !strings.Contains(err.Error(), "按参数失败") {
-		t.Fatalf("业务错误未透出: %v", err)
+	// 业务错误不应杀进程：拿到的是错误消息而不是 ErrCrashed。
+	_, err = rt.Call(context.Background(), "demo", dir, sdk.Request{
+		ID: "c2", Method: "upload", Config: sdk.Config{"fail": "1"},
+		Input: &sdk.Input{FileName: "b.png"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "上游拒绝") {
+		t.Fatalf("业务错误应原样返回，实际: %v", err)
 	}
-	if resp3, err := call(sdk.Config{}, 5); err != nil || resp3.Result.Extra["pid"] != firstPID {
-		t.Fatalf("业务错误后进程不应重启: %v %+v", err, resp3.Result)
+	if _, err := rt.Call(context.Background(), "demo", dir, sdk.Request{
+		ID: "c3", Method: "ping",
+	}); err != nil {
+		t.Fatalf("业务错误后进程应仍然可用: %v", err)
 	}
 }
 
-// TestCallTimeoutKillsProcess 验证超时会杀掉进程，下次调用自动重启并正常工作。
+func TestLoadRejectsBrokenSource(t *testing.T) {
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "broken", "package main\n\nfunc main() {\n")
+
+	_, err := rt.Load(context.Background(), "broken", dir)
+	if err == nil {
+		t.Fatal("语法错误应导致加载失败")
+	}
+	if !errors.Is(err, ErrLoad) {
+		t.Fatalf("错误应可被 ErrLoad 识别，实际: %v", err)
+	}
+	if !strings.Contains(err.Error(), "main.go:") {
+		t.Fatalf("错误应带文件名与行号，实际: %v", err)
+	}
+}
+
 func TestCallTimeoutKillsProcess(t *testing.T) {
-	rt := newTestRuntime(t)
-	dir := writePlugin(t, rt, "t2", testPlugin)
-	if _, err := rt.Build(context.Background(), "t2", dir); err != nil {
-		t.Fatalf("编译失败: %v", err)
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "slow", slowPlugin)
+	if _, err := rt.Load(context.Background(), "slow", dir); err != nil {
+		t.Fatal(err)
 	}
-	input := &sdk.Input{FileName: "a.png", Size: 4, Path: writeFile(t, "a.png")}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	start := time.Now()
-	_, err := rt.Call(ctx, "t2", dir, sdk.Request{
-		ID: "slow", Method: "upload", Config: sdk.Config{"mode": "slow"},
-		TimeoutSecs: 1, Input: input,
+	_, err := rt.Call(context.Background(), "slow", dir, sdk.Request{
+		ID: "t1", Method: "upload", Input: &sdk.Input{FileName: "a.png"}, TimeoutSecs: 1,
 	})
-	if err == nil {
-		t.Fatal("慢调用应超时")
-	}
 	if !errors.Is(err, ErrTimeout) {
-		t.Fatalf("错误应为 ErrTimeout: %v", err)
+		t.Fatalf("应超时，实际: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 4*time.Second {
-		t.Fatalf("超时控制未生效，耗时 %s", elapsed)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("超时后应立即返回，实际等了 %s", d)
 	}
+}
 
-	// 进程已被杀掉，下一次调用要能自动重启。
-	resp, err := rt.Call(context.Background(), "t2", dir, sdk.Request{
-		ID: "after", Method: "upload", TimeoutSecs: 5, Input: input,
+func TestEnsureLoadedCaches(t *testing.T) {
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "demo", rtPlugin)
+
+	if err := rt.EnsureLoaded(context.Background(), "demo", dir); err != nil {
+		t.Fatal(err)
+	}
+	sha := rt.LoadSHA("demo")
+	if sha == "" {
+		t.Fatal("加载后应能读到源码 SHA")
+	}
+	// 再调用一次不应重启进程（SHA 不变，进程存活）。
+	if err := rt.EnsureLoaded(context.Background(), "demo", dir); err != nil {
+		t.Fatal(err)
+	}
+	if rt.LoadSHA("demo") != sha {
+		t.Fatal("重复 EnsureLoaded 不应重新加载")
+	}
+}
+
+func TestLoadHotSwap(t *testing.T) {
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "demo", rtPlugin)
+	if _, err := rt.Load(context.Background(), "demo", dir); err != nil {
+		t.Fatal(err)
+	}
+	first := rt.LoadSHA("demo")
+
+	updated := strings.Replace(rtPlugin, "https://cdn.example.com/", "https://new.example.com/", 1)
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(updated), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := rt.Load(context.Background(), "demo", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.SHA256 == first {
+		t.Fatal("改源码后 SHA 应变化")
+	}
+	resp, err := rt.Call(context.Background(), "demo", dir, sdk.Request{
+		ID: "c1", Method: "upload", Input: &sdk.Input{FileName: "a.png"},
 	})
 	if err != nil {
-		t.Fatalf("超时后重启失败: %v", err)
+		t.Fatal(err)
 	}
-	if resp.Result == nil || resp.Result.FileName != "a.png" {
-		t.Fatalf("重启后结果异常: %+v", resp.Result)
+	if resp.Result.URL != "https://new.example.com/a.png" {
+		t.Fatalf("应运行新代码，实际: %s", resp.Result.URL)
 	}
 }
 
-// TestBuildFailureKeepsOutput 验证编译错误会带回编译器原始输出，便于 Agent 自我修复。
-func TestBuildFailureKeepsOutput(t *testing.T) {
-	rt := newTestRuntime(t)
-	dir := writePlugin(t, rt, "t3", "package main\n\nfunc main() { oops() }\n")
+func TestLoadUpgradesLegacyEntry(t *testing.T) {
+	rt := newRuntime(t)
+	legacy := strings.Replace(rtPlugin, "sdk.Serve(plugin{}.Upload, plugin{}.Check)", "sdk.Serve(plugin{})", 1)
+	dir := writeSource(t, rt, "legacy", legacy)
 
-	res, err := rt.Build(context.Background(), "t3", dir)
-	if err == nil {
-		t.Fatal("源码有误应编译失败")
+	if _, err := rt.Load(context.Background(), "legacy", dir); err != nil {
+		t.Fatalf("旧入口应自动升级并加载成功: %v", err)
 	}
-	if !errors.Is(err, ErrBuild) {
-		t.Fatalf("错误应可用 ErrBuild 判定: %v", err)
-	}
-	if res == nil || !strings.Contains(res.Output, "oops") {
-		t.Fatalf("应带回编译器输出: %+v", res)
-	}
-	// 源码必须保留，方便下一轮修复。
-	if _, statErr := os.Stat(filepath.Join(dir, "main.go")); statErr != nil {
-		t.Fatalf("编译失败不应删除源码: %v", statErr)
+	raw, _ := os.ReadFile(filepath.Join(dir, "main.go"))
+	if !strings.Contains(string(raw), "(plugin{}).Upload") {
+		t.Fatalf("旧入口未被改写:\n%s", raw)
 	}
 }
 
-// TestEnsureBuiltCaches 验证已就绪的产物不会重复编译。
-func TestEnsureBuiltCaches(t *testing.T) {
-	rt := newTestRuntime(t)
-	dir := writePlugin(t, rt, "t4", testPlugin)
-	if err := rt.EnsureBuilt(context.Background(), "t4", dir); err != nil {
+func TestDropRestartsProcess(t *testing.T) {
+	rt := newRuntime(t)
+	dir := writeSource(t, rt, "demo", rtPlugin)
+	if _, err := rt.Load(context.Background(), "demo", dir); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.Stat(BinaryPath(dir))
-	if err != nil {
-		t.Fatal(err)
+	rt.Drop("demo")
+	if rt.LoadSHA("demo") != "" {
+		t.Fatal("Drop 后不应再报告已加载")
 	}
-	time.Sleep(10 * time.Millisecond)
-	if err := rt.EnsureBuilt(context.Background(), "t4", dir); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.Stat(BinaryPath(dir))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !after.ModTime().Equal(before.ModTime()) {
-		t.Fatal("产物已就绪时不应重新编译")
+	if err := rt.EnsureLoaded(context.Background(), "demo", dir); err != nil {
+		t.Fatalf("Drop 后应能重新加载: %v", err)
 	}
 }
 
-func TestBuildWithoutToolchain(t *testing.T) {
-	root := t.TempDir()
-	rt, err := New(Options{PluginsDir: filepath.Join(root, "p"), CacheDir: filepath.Join(root, "c")})
-	if err != nil {
+func TestCallWithoutSource(t *testing.T) {
+	rt := newRuntime(t)
+	dir := filepath.Join(rt.Options().PluginsDir, "empty")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	defer rt.Close()
-	rt.goBin = "" // 模拟未安装 Go
-	dir := writePlugin(t, rt, "t5", testPlugin)
-	if _, err := rt.Build(context.Background(), "t5", dir); err == nil ||
-		!strings.Contains(err.Error(), "未找到 go 命令") {
-		t.Fatalf("缺少工具链时应给出明确提示: %v", err)
-	}
-	if _, err := rt.Call(context.Background(), "t5", dir, sdk.Request{Method: "ping"}); err == nil {
-		t.Fatal("没有产物时调用应失败")
-	}
-}
-
-// TestBuildEnvIsolation 验证编译环境不会被外部 GOFLAGS/GOWORK 等污染。
-func TestBuildEnvIsolation(t *testing.T) {
-	root := t.TempDir()
-	rt, err := New(Options{PluginsDir: filepath.Join(root, "p"), CacheDir: filepath.Join(root, "c")})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rt.Close()
-
-	t.Setenv("GOFLAGS", "-mod=vendor")
-	t.Setenv("GOWORK", "/tmp/whatever")
-	t.Setenv("CGO_ENABLED", "1")
-	t.Setenv("GOCACHE", "/tmp/evil-cache")
-
-	env := map[string]string{}
-	for _, kv := range rt.buildEnv() {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			env[kv[:i]] = kv[i+1:]
-		}
-	}
-	want := map[string]string{
-		"CGO_ENABLED": "0",
-		"GOFLAGS":     "-mod=mod",
-		"GOWORK":      "off",
-		"GOTOOLCHAIN": "local",
-		"GOCACHE":     filepath.Join(rt.Options().CacheDir, "go-build"),
-		"GOMODCACHE":  filepath.Join(rt.Options().CacheDir, "gomod"),
-		"GOPATH":      filepath.Join(rt.Options().CacheDir, "gopath"),
-	}
-	for k, v := range want {
-		if env[k] != v {
-			t.Fatalf("%s=%q，期望 %q", k, env[k], v)
-		}
+	_, err := rt.Call(context.Background(), "empty", dir, sdk.Request{ID: "c", Method: "ping"})
+	if !errors.Is(err, ErrLoad) {
+		t.Fatalf("没有源码时应报加载错误，实际: %v", err)
 	}
 }

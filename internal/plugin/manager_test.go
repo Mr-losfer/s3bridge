@@ -9,9 +9,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Mr-losfer/s3bridge/internal/plugin/engine"
 	"github.com/Mr-losfer/s3bridge/internal/plugin/runtime"
 	"github.com/Mr-losfer/s3bridge/internal/store"
 )
+
+// TestMain 让测试二进制充当插件 runner：生产环境里 runner 是主程序本身。
+func TestMain(m *testing.M) {
+	if len(os.Args) >= 3 && os.Args[1] == "__plugin_runner__" {
+		if err := engine.Run(os.Args[2], os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // identity 是最简单的「加密」实现，测试里不需要真加密，但要能验证 encode/decode 闭环。
 func identity(v string) (string, error) { return v, nil }
@@ -26,7 +38,6 @@ func newManager(t *testing.T, builtins []Builtin) (*Manager, store.Store) {
 	t.Cleanup(func() { _ = st.Close() })
 	rt, err := runtime.New(runtime.Options{
 		PluginsDir: filepath.Join(root, "plugins"),
-		CacheDir:   filepath.Join(root, "cache"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +68,7 @@ func TestMigrateLegacyDeclarative(t *testing.T) {
 	}
 
 	dir := filepath.Join(m.pluginsDir, "old-up")
-	for _, name := range []string{"plugin.json", "main.go", "go.mod", "legacy-definition.json"} {
+	for _, name := range []string{"plugin.json", "main.go", "legacy-definition.json"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("迁移后缺少 %s: %v", name, err)
 		}
@@ -141,8 +152,8 @@ func TestEnsureBuiltinKeepsUserEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	dir := filepath.Join(m.pluginsDir, "demo")
-	if _, err := os.Stat(filepath.Join(dir, "go.mod")); err != nil {
-		t.Fatalf("内置插件应生成 go.mod: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "plugin.json")); err != nil {
+		t.Fatalf("内置插件应落盘 plugin.json: %v", err)
 	}
 	_ = st.View(func(s *store.State) error {
 		p := store.PluginByID(s, "demo")
@@ -170,9 +181,6 @@ func TestEnsureBuiltinKeepsUserEdits(t *testing.T) {
 
 // TestCreateRejectsDuplicate 验证 ID 冲突与非法清单会被拒绝，且不留下半个目录。
 func TestCreateRejectsDuplicate(t *testing.T) {
-	if testing.Short() {
-		t.Skip("需要真实编译，-short 模式下跳过")
-	}
 	m, _ := newManager(t, nil)
 	spec := CreateSpec{ID: "dup", Name: "重复", Template: "blank"}
 	if _, err := m.Create(context.Background(), spec, "tester"); err != nil {

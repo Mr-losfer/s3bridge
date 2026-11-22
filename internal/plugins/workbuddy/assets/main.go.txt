@@ -243,4 +243,4 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-func main() { sdk.Serve(plugin{}) }
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }

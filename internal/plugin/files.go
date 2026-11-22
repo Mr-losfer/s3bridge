@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Mr-losfer/s3bridge/internal/store"
 )
@@ -70,7 +72,7 @@ func (m *Manager) FileGet(id, name string) (FileContent, error) {
 	}, nil
 }
 
-// FilePut 写入文件；.go 变更会立即编译，编译失败保留源码并返回报告。
+// FilePut 写入文件；.go 变更会立即重新加载，加载失败保留源码并返回报告。
 func (m *Manager) FilePut(ctx context.Context, id, name, content, actor string) (View, *BuildReport, error) {
 	_, _, _, dir, err := m.loadMeta(id)
 	if err != nil {
@@ -151,7 +153,7 @@ func (m *Manager) FileRename(ctx context.Context, id, from, to, actor string) (V
 	return view, report, err
 }
 
-// Build 编译插件并记录结果。编译失败不会删除源码或旧二进制。
+// Build 加载插件并记录结果。加载失败不会删除源码，也不影响其他插件。
 func (m *Manager) Build(ctx context.Context, id, actor string) (*BuildReport, error) {
 	p, mf, _, dir, err := m.loadMeta(id)
 	if err != nil {
@@ -163,10 +165,7 @@ func (m *Manager) Build(ctx context.Context, id, actor string) (*BuildReport, er
 		m.setBuildState(id, nil, err)
 		return report, err
 	}
-	if err := EnsureGoMod(dir, id, m.rt.SDKPath()); err != nil {
-		return nil, err
-	}
-	res, buildErr := m.rt.Build(ctx, id, dir)
+	res, buildErr := m.rt.Load(ctx, id, dir)
 	report := &BuildReport{OK: buildErr == nil, At: store.NowUTC()}
 	if res != nil {
 		report.Output = res.Output
@@ -175,9 +174,9 @@ func (m *Manager) Build(ctx context.Context, id, actor string) (*BuildReport, er
 		report.Size = res.Size
 	}
 	m.setBuildState(id, res, buildErr)
-	msg := "编译成功"
+	msg := "加载成功"
 	if buildErr != nil {
-		msg = "编译失败：" + truncateMsg(buildErr.Error(), 200)
+		msg = "加载失败：" + truncateMsg(buildErr.Error(), 200)
 	}
 	_ = m.st.Update(func(st *store.State) error {
 		st.Changes = append(st.Changes, newChange(id, "build", actor,
@@ -204,7 +203,7 @@ type CreateSpec struct {
 	TimeoutSecs int
 }
 
-// Create 从模板创建一个 Go 插件文件夹并立即编译。
+// Create 从模板创建一个 Go 插件文件夹并立即加载。
 func (m *Manager) Create(ctx context.Context, spec CreateSpec, actor string) (View, error) {
 	id := strings.ToLower(strings.TrimSpace(spec.ID))
 	tpl, ok := TemplateByKind(pick(spec.Template, "blank"))
@@ -265,9 +264,6 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec, actor string) (Vi
 	if err := SaveManifest(dir, mf); err != nil {
 		return View{}, err
 	}
-	if err := EnsureGoMod(dir, id, m.rt.SDKPath()); err != nil {
-		return View{}, err
-	}
 
 	params := DefaultParams(mf)
 	for k, v := range spec.Params {
@@ -289,7 +285,7 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec, actor string) (Vi
 			ID: id, Kind: id, Name: mf.Name, Description: mf.Description,
 			Version: mf.Version, Author: mf.Author, Enabled: spec.Enabled,
 			Priority: mf.Priority, FileTypes: types, Params: sealed,
-			Status: store.StatusUnknown, StatusMessage: "新建插件，等待编译",
+			Status: store.StatusUnknown, StatusMessage: "新建插件，等待加载",
 			Health: store.HealthConfig{Enabled: true, IntervalSecs: 300, TimeoutSecs: 8, FailThreshold: 2, ProbeMode: "ping"},
 			Dir:    dir, ValidityHours: mf.Validity.IntervalHours, Custom: true,
 			Revision: 1, CreatedAt: now, UpdatedAt: now,
@@ -302,15 +298,15 @@ func (m *Manager) Create(ctx context.Context, spec CreateSpec, actor string) (Vi
 		return View{}, err
 	}
 
-	// 同步编译：创建后即可用；失败保留源码供修改。
+	// 同步加载：创建后即可用；失败保留源码供修改。
 	if _, err := m.Build(ctx, id, actor); err != nil {
 		view, _ := m.Get(id)
-		return view, fmt.Errorf("插件已创建，但编译失败：%w", err)
+		return view, fmt.Errorf("插件已创建，但加载失败：%w", err)
 	}
 	return m.Get(id)
 }
 
-// UpdateManifest 更新清单（参数 Schema、超时、有效性周期等），不触发重新编译。
+// UpdateManifest 更新清单（参数 Schema、超时、有效性周期等），不触发重新加载。
 func (m *Manager) UpdateManifest(id string, next Manifest, actor string) (View, error) {
 	p, _, _, dir, err := m.loadMeta(id)
 	if err != nil {
@@ -377,7 +373,7 @@ func (m *Manager) Export(id string) (map[string]string, Manifest, error) {
 	return out, mf, nil
 }
 
-// ValidateSource 在临时目录编译一份源码，不落库、不覆盖现有插件。
+// ValidateSource 在临时目录加载一份源码，不落库、不覆盖现有插件。
 func (m *Manager) ValidateSource(ctx context.Context, files map[string]string, mf Manifest) (*BuildReport, []string, error) {
 	if mf.ID == "" {
 		mf.ID = "validate"
@@ -386,7 +382,7 @@ func (m *Manager) ValidateSource(ctx context.Context, files map[string]string, m
 	if err := mf.Validate(); err != nil {
 		return nil, nil, err
 	}
-	dir, err := os.MkdirTemp(m.rt.Options().CacheDir, "validate-*")
+	dir, err := os.MkdirTemp("", "s3bridge-validate-*")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -408,13 +404,12 @@ func (m *Manager) ValidateSource(ctx context.Context, files map[string]string, m
 	if err := SaveManifest(dir, mf); err != nil {
 		return nil, nil, err
 	}
-	if err := EnsureGoMod(dir, mf.ID, m.rt.SDKPath()); err != nil {
-		return nil, nil, err
-	}
 	if err := CheckLayout(dir, mf); err != nil {
 		return &BuildReport{OK: false, Output: err.Error(), At: store.NowUTC()}, names, nil
 	}
-	res, buildErr := m.rt.Build(ctx, "validate", dir)
+	vid := "validate-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	res, buildErr := m.rt.Load(ctx, vid, dir)
+	m.rt.Drop(vid)
 	report := &BuildReport{OK: buildErr == nil, At: store.NowUTC()}
 	if res != nil {
 		report.Output, report.DurationMs = res.Output, res.DurationMs
@@ -425,5 +420,5 @@ func (m *Manager) ValidateSource(ctx context.Context, files map[string]string, m
 	return report, names, nil
 }
 
-// ErrNoFiles 表示没有任何源码可编译。
+// ErrNoFiles 表示没有任何源码可加载。
 var ErrNoFiles = errors.New("没有可编译的源码")

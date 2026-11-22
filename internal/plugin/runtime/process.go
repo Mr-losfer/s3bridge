@@ -8,17 +8,19 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/Mr-losfer/s3bridge/internal/plugin/engine"
 	"github.com/Mr-losfer/s3bridge/internal/plugin/sdk"
 )
 
 var (
-	// ErrBuild 表示编译失败，原始日志在 BuildResult.Output 中。
-	ErrBuild = errors.New("插件编译失败")
+	// ErrLoad 表示插件源码无法加载（语法错误、入口缺失、导入了不支持的包等）。
+	ErrLoad = engine.ErrLoad
 	// ErrTimeout 表示调用超过插件超时时间，进程已被杀掉。
 	ErrTimeout = errors.New("插件调用超时")
 	// ErrCrashed 表示插件进程异常退出。
@@ -30,8 +32,15 @@ type process struct {
 	cmd  *exec.Cmd
 	in   *bufio.Writer
 	out  *bufio.Reader
-	errs *ringBuf
+	log  *ringBuf
 	done chan struct{}
+
+	// 加载时由 ping 响应带回，用于展示与排查。
+	notes      []string
+	sha        string
+	sourceSize int
+	files      int
+	entry      string
 
 	mu       sync.Mutex // 串行化同一插件的调用
 	lastUsed atomic.Int64
@@ -41,7 +50,7 @@ type process struct {
 // Call 向插件进程发送一次调用。同一插件的调用串行执行（插件无需自己加锁），
 // 超时会杀掉进程并在下次调用时自动重启。
 func (r *Runtime) Call(ctx context.Context, id, dir string, req sdk.Request) (sdk.Response, error) {
-	p, err := r.proc(id, dir)
+	p, err := r.start(ctx, id, dir)
 	if err != nil {
 		return sdk.Response{}, err
 	}
@@ -99,7 +108,7 @@ func (r *Runtime) callLocked(ctx context.Context, p *process, req sdk.Request, t
 		return sdk.Response{}, fmt.Errorf("%w（>%s）", ErrTimeout, timeout)
 	case res := <-ch:
 		if res.err != nil {
-			msg := strings.TrimSpace(p.errs.String())
+			msg := strings.TrimSpace(p.log.String())
 			p.kill()
 			if msg != "" {
 				return sdk.Response{}, fmt.Errorf("%w: %v；stderr: %s", ErrCrashed, res.err, truncate(msg, 400))
@@ -125,7 +134,8 @@ func (r *Runtime) callLocked(ctx context.Context, p *process, req sdk.Request, t
 	}
 }
 
-func (r *Runtime) proc(id, dir string) (*process, error) {
+// start 启动插件 runner 进程并完成 ping 握手。
+func (r *Runtime) start(ctx context.Context, id, dir string) (*process, error) {
 	r.mu.Lock()
 	if p := r.procs[id]; p != nil && !p.dead.Load() {
 		r.mu.Unlock()
@@ -134,13 +144,11 @@ func (r *Runtime) proc(id, dir string) (*process, error) {
 	delete(r.procs, id)
 	r.mu.Unlock()
 
-	bin := binaryPath(dir)
-	if fi, err := os.Stat(bin); err != nil || fi.Size() == 0 {
-		return nil, fmt.Errorf("插件二进制不存在，请先构建")
-	}
-	p := &process{id: id, errs: &ringBuf{max: 8 << 10}, done: make(chan struct{})}
+	dir = absDir(dir)
+	p := &process{id: id, log: &ringBuf{max: 32 << 10}, done: make(chan struct{})}
 	p.lastUsed.Store(time.Now().UnixNano())
-	cmd := exec.Command(bin)
+
+	cmd := exec.Command(r.self, r.runnerArgs(dir)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "S3BRIDGE_PLUGIN_ID="+id)
 	inPipe, err := cmd.StdinPipe()
@@ -151,7 +159,7 @@ func (r *Runtime) proc(id, dir string) (*process, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = p.errs
+	cmd.Stderr = p.log
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("启动插件进程: %w", err)
 	}
@@ -164,18 +172,43 @@ func (r *Runtime) proc(id, dir string) (*process, error) {
 		close(p.done)
 	}()
 
-	// 握手：确认进程能正常响应协议，避免把编译产物损坏当成业务错误。
-	pingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// 握手：runner 会先加载源码，ping 通过意味着源码可执行、入口已注册。
+	loadCtx, cancel := context.WithTimeout(ctx, r.opts.LoadTimeout)
 	defer cancel()
-	if _, err := r.callLocked(pingCtx, p, sdk.Request{ID: "ping-0", Method: "ping", TimeoutSecs: 5}, 5*time.Second); err != nil {
+	resp, err := r.callLocked(loadCtx, p, sdk.Request{
+		ID: "ping-0", Method: "ping", TimeoutSecs: int(r.opts.LoadTimeout.Seconds()) + 1,
+	}, r.opts.LoadTimeout)
+	if err != nil {
+		msg := strings.TrimSpace(p.log.String())
 		p.kill()
-		return nil, fmt.Errorf("插件启动失败: %w", err)
+		if msg != "" {
+			msg = trimOutput(msg)
+			// runner 的 stderr 已经带了「插件加载失败:」前缀，去掉一层避免重复。
+			msg = strings.TrimPrefix(msg, ErrLoad.Error()+": ")
+			return nil, fmt.Errorf("%w: %s", ErrLoad, msg)
+		}
+		return nil, fmt.Errorf("%w: %v", ErrLoad, err)
 	}
+	p.notes = resp.Notes
+	p.sha = resp.Meta["sha256"]
+	p.entry = resp.Meta["entry"]
+	p.sourceSize, _ = strconv.Atoi(resp.Meta["size"])
+	p.files, _ = strconv.Atoi(resp.Meta["files"])
 
 	r.mu.Lock()
 	r.procs[id] = p
 	r.mu.Unlock()
 	return p, nil
+}
+
+// LoadSHA 返回当前进程加载的源码 SHA-256；进程未运行时为空。
+func (r *Runtime) LoadSHA(id string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.procs[id]; p != nil && !p.dead.Load() {
+		return p.sha
+	}
+	return ""
 }
 
 func (p *process) kill() {
@@ -191,7 +224,7 @@ func (p *process) kill() {
 	}
 }
 
-// Drop 杀掉指定插件的进程（编译成功后强制下次调用加载新二进制）。
+// Drop 杀掉指定插件的进程（源码变更后强制下次调用加载新代码）。
 func (r *Runtime) Drop(id string) {
 	r.mu.Lock()
 	p := r.procs[id]
@@ -229,7 +262,7 @@ func (r *Runtime) reap() {
 	}
 }
 
-// ringBuf 保存 stderr 末尾内容，进程崩溃时用于诊断。
+// ringBuf 保存 stderr 末尾内容，加载失败或进程崩溃时用于诊断。
 type ringBuf struct {
 	mu  sync.Mutex
 	buf []byte

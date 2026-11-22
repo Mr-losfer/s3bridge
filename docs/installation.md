@@ -46,29 +46,26 @@ docker build -t s3bridge:local \
   https://github.com/Mr-losfer/s3bridge.git#main
 ```
 
-> Dockerfile 是多阶段构建：Node 阶段编译 Vue 前端，Go 阶段静态编译，最终镜像基于 `alpine`，只包含二进制与 CA 证书，体积约 20MB，非 root 运行。
+> Dockerfile 是多阶段构建：Node 阶段编译 Vue 前端，Go 阶段静态编译，最终镜像基于 `alpine`，只包含二进制与 CA 证书，非 root 运行。
 
-### 镜像变体：要不要内置 Go 工具链
+### 关于镜像体积
 
-v2.0 起插件在**运行时**用 `go build` 编译，因此镜像分两种：
+插件由**内嵌 Go 解释器**直接执行源码，镜像里不需要 Go 工具链，也没有 `-go` 变体：
 
-| 标签 | 体积 | 能做什么 |
+| 标签 | 体积 | 说明 |
 | --- | --- | --- |
-| `ghcr.io/mr-losfer/s3bridge:latest`（或固定版本 `:v2.0.1`） | 约 20 MB | 运行已编译好的插件；新建/修改源码时会提示未安装 Go |
-| `ghcr.io/mr-losfer/s3bridge:latest-go`（或 `:v2.0.1-go`） | 约 320 MB（含 Go） | 全部功能：后台编辑源码、让 Agent 写插件、保存即编译 |
+| `ghcr.io/mr-losfer/s3bridge:latest`（或固定版本 `:v2.1.0`） | 约 23 MB（压缩后，即镜像仓库显示值） | 全部功能：后台编辑源码、让 Agent 写插件、保存即生效 |
 
+解释器（`traefik/yaegi`）把标准库符号表编进了二进制，未压缩镜像约 55 MB，但压缩后**只有 22.9 MB**，
+与 v2.0.1 的 22.4 MB 基本持平——Go 二进制的压缩率很高，多出来的符号表几乎不占传输体积。
 生产环境建议固定版本号而不是 `latest`，避免自动升级带来意外。
-
-只做上传转发就用精简版；需要在线开发插件（或让 AI 全程开发）请用 `-go` 版本：
 
 ```bash
 docker run -d --name s3bridge -p 8080:8080 \
   -v s3bridge-data:/app/data \
   -e S3BRIDGE_BOOTSTRAP_PASSWORD='换成你的强密码' \
-  ghcr.io/mr-losfer/s3bridge:latest-go
+  ghcr.io/mr-losfer/s3bridge:latest
 ```
-
-> 精简版也可以挂载宿主机上的 Go：`-v /usr/local/go:/usr/local/go:ro -e PATH=/usr/local/go/bin:$PATH`。
 
 ---
 
@@ -231,7 +228,7 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `S3BRIDGE_ADDR` | `:8080` | 监听地址，如 `127.0.0.1:8080` |
-| `S3BRIDGE_DATA_DIR` | `./data` | 数据目录（容器内 `/app/data`），存放 `state.json`、`master.key`、`objects/`、插件源码 `plugins/`、插件 SDK 与编译缓存 `sdk/` `cache/`、监控数据 `obs/` 与缩略图缓存 `thumbs/` |
+| `S3BRIDGE_DATA_DIR` | `./data` | 数据目录（容器内 `/app/data`），存放 `state.json`、`master.key`、`objects/`、插件源码 `plugins/`、监控数据 `obs/` 与缩略图缓存 `thumbs/` |
 | `S3BRIDGE_MASTER_KEY` | 自动生成 | 32 字节主密钥（base64 或原始串），用于加密敏感参数与 API Key。**生产建议显式设置并备份** |
 | `S3BRIDGE_BOOTSTRAP_USER` | `admin` | 初始管理员用户名 |
 | `S3BRIDGE_BOOTSTRAP_PASSWORD` | 随机生成 | 初始管理员密码；不设置时随机生成并**只在启动日志打印一次** |
@@ -249,9 +246,9 @@ go install github.com/Mr-losfer/s3bridge/cmd/s3bridge-mcp@latest
 | `S3BRIDGE_UPDATE_AUTO_CHECK` | `true` | 是否启用定时检测；关闭后仍可在后台手动点「检测更新」 |
 | `S3BRIDGE_UPDATE_STRATEGY` | `auto` | `auto`（自动识别容器）/ `binary` / `container` |
 
-> **插件编译依赖 Go 工具链**：v2.0 起插件在运行时用 `go build` 编译。若要做插件开发/修改源码，
-> 主机需安装 **Go 1.21+**（或使用带 Go 的镜像变体）；只运行已编译好的插件二进制则不需要。
-> 编译缓存与 SDK 都在数据目录内，无需额外配置，也不需要联网。
+> **插件不需要 Go 工具链**：v2.1 起插件源码由服务端**内嵌的 Go 解释器**直接执行，主机与镜像都无需安装 Go，
+> 也不需要联网。写完源码保存即生效（典型 10 ms 内），因此可以在后台或 MCP 里在线开发插件。
+> 唯一的边界是只能使用标准库——第三方模块会在加载时被明确拒绝并提示改用标准库实现。
 
 > **密钥管理**：未显式设置 `S3BRIDGE_MASTER_KEY` 时，服务会在数据目录生成 `master.key`（权限 0600）。**丢失这个文件等于丢失所有已加密的插件参数与 API Key**，请连同 `state.json` 一起备份。
 
@@ -361,8 +358,6 @@ sudo systemctl start s3bridge
 | `obs/metrics.gob` | 指标快照（重启后恢复曲线） | 可删，代价是历史曲线归零 |
 | `obs/events/` | 异常日志 JSONL（8 MB 轮转 × 3 份） | 可删 |
 | `thumbs/` | 缩略图缓存（按 SHA-256 + 宽度） | 可删，会按需重新生成 |
-| `plugins/*/.build/` | 插件编译产物 | 可删，下次调用或保存源码时自动重新编译 |
-| `sdk/` `cache/` | 插件 SDK 源码（用于 `replace`）与 Go 构建缓存 | 可删，服务启动时重建；删 `cache/` 会让下一次编译变慢 |
 | `updates/` | 自更新下载的旧版本备份 | 可删 |
 
 ---

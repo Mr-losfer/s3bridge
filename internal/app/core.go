@@ -58,10 +58,10 @@ func New(cfg *config.Config, version string) (*Core, error) {
 		return nil, fmt.Errorf("初始化管理员: %w", err)
 	}
 
-	// 插件运行时：落盘 SDK、探测 Go 工具链。工具链缺失时仍可运行已编译插件。
+	// 插件运行时：内嵌解释器，不依赖外部 Go 工具链。
 	rt, err := pluginrt.New(pluginrt.Options{
-		PluginsDir: cfg.PluginsDir, CacheDir: cfg.PluginCacheDir,
-		BuildTimeout: 2 * time.Minute, IdleTimeout: 10 * time.Minute, CallTimeout: 60 * time.Second,
+		PluginsDir:  cfg.PluginsDir,
+		LoadTimeout: 30 * time.Second, IdleTimeout: 10 * time.Minute, CallTimeout: 60 * time.Second,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("初始化插件运行时: %w", err)

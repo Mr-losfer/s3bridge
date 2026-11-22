@@ -1,39 +1,39 @@
 # 插件开发文档
 
-> **v2.0 起插件就是 Go 程序。** 一个插件 = 一个文件夹，里面是 `plugin.json`（元信息与参数 Schema）
-> 加任意多个 `.go` 文件。服务端在运行时用 `go build` 把它编译成独立可执行文件，以子进程方式调用。
-> 因此你可以做**任意请求、任意 HTTP 方法（含 PUT/DELETE/multipart）、任意加解密与签名**，
-> 而不只是「填一个请求模板」——没有模板能表达的逻辑，写代码就行。
+> **v2.1 起插件由内嵌解释器直接执行，不需要安装 Go 工具链。**
+> 一个插件 = 一个文件夹，里面是 `plugin.json`（元信息与参数 Schema）加任意多个 `.go` 文件。
+> 后台保存源码后服务端在**毫秒级**完成加载，立即生效；跑的仍然是 Go，标准库随便用——
+> 可以做**任意请求、任意 HTTP 方法（含 PUT/DELETE/multipart）、任意加解密与签名**，
+> 而不只是「填一个请求模板」。
 
 本文档按「读一份能跑的代码 → 动手改 → 调试 → 发布」的顺序组织：
 
 | 章节 | 你会得到 |
 | --- | --- |
 | [1. 五分钟写出第一个插件](#1-五分钟写出第一个插件) | 一个能真实上传的插件 |
-| [2. 文件夹结构与协议](#2-文件夹结构与协议) | 插件由什么组成、主服务如何调用它 |
+| [2. 文件夹结构与入口约定](#2-文件夹结构与入口约定) | 插件由什么组成、怎么被加载 |
 | [3. SDK 参考](#3-sdk-参考) | `Input`/`Output`/`Config`/`Client`/加解密工具 |
 | [4. 参数 Schema](#4-参数-schemainpluginjson) | 后台表单怎么来的、敏感值怎么加密 |
-| [5. 用 MCP 让 Agent 全程开发](#5-用-mcp-让-agent-全程开发) | 创建 → 写码 → 编译 → 调试 → 上传验证 |
-| [6. 编译与运行时](#6-编译与运行时) | 离线编译、超时、崩溃隔离、空闲回收 |
+| [5. 用 MCP 让 Agent 全程开发](#5-用-mcp-让-agent-全程开发) | 创建 → 写码 → 加载 → 调试 → 上传验证 |
+| [6. 执行与运行时](#6-执行与运行时) | 多文件合并、能力边界、超时、崩溃隔离 |
 | [7. 调试与请求追踪](#7-调试与请求追踪) | 看到插件到底发了什么请求 |
 | [8. 图片有效性巡检](#8-图片有效性巡检) | 归档图片按周期自检，失效自动告警 |
-| [9. 常见问题](#9-常见问题) | 编译失败、Token 过期、迁移 |
+| [9. 常见问题](#9-常见问题) | 加载失败、Token 过期、迁移 |
 
 ---
 
 ## 1. 五分钟写出第一个插件
 
 后台「插件管理 → 创建插件」选择模板 **HTTP 表单上传**，ID 填 `my-uploader`，点创建。
-服务端会生成文件夹并立即编译，成功后会跳到详情页的「插件源码」标签：
+服务端会生成文件夹并立即加载，成功后会跳到详情页的「插件源码」标签：
 
 ```
 my-uploader/
 ├── plugin.json   # 参数 Schema 与元信息（系统维护，只读）
-├── go.mod        # 独立模块，replace 指向服务端落盘的 SDK（系统维护）
 └── main.go       # 你的代码
 ```
 
-打开 `main.go`，把 `cfg["upload_url"]` 指向你的接口，保存即可生效。核心只有一个方法：
+打开 `main.go`，把 `cfg["upload_url"]` 指向你的接口，保存即可生效。核心只有两个方法：
 
 ```go
 func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
@@ -55,44 +55,73 @@ func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Ou
 	defer resp.Body.Close()
 	// …解析响应，返回标准输出
 }
+
+func (plugin) Check(ctx context.Context, cfg sdk.Config) error {
+	_, err := sdk.NewClient(10 * time.Second).Bytes(ctx, http.MethodHead, cfg["upload_url"], nil, nil)
+	return err
+}
+
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 ```
 
-保存后后台会立刻编译并热切换，**不需要重启服务**。
+保存后后台会立刻重新加载并热切换，**不需要重启服务，也不需要编译**。
 
 ---
 
-## 2. 文件夹结构与协议
+## 2. 文件夹结构与入口约定
 
 ### 2.1 目录约定
 
 | 文件 | 谁维护 | 说明 |
 | --- | --- | --- |
 | `plugin.json` | 系统 | 元信息 + 参数 Schema + 健康检测建议 + 巡检周期，只读（用 `plugin_manifest_update` 改） |
-| `go.mod` / `go.sum` | 系统 | 独立模块，`replace github.com/Mr-losfer/s3bridge/sdk => {数据目录}/sdk/s3bridge-sdk` |
-| `*.go` | 你 | 任意多个文件，至少一个包含 `func main()` |
-| `*.md` / `*.txt` / `*.yaml` | 你 | 说明与配置样例，不参与编译 |
+| `*.go` | 你 | 任意多个文件，同一 `package main`；可以拆成 `helper.go`、`sign.go` 等 |
+| `*.md` / `*.txt` / `*.yaml` | 你 | 说明与配置样例，不参与执行 |
+| `go.mod` | 忽略 | v2.0 生成的历史文件，存在也不影响；可以删掉 |
 
 限制：单文件 ≤ 512 KB，总源码 ≤ 2 MB，最多 64 个文件；文件名不能带路径分隔符或以点开头。
-编译产物写在 `.build/plugin`，不会出现在文件列表里。
 
-### 2.2 进程协议
+### 2.2 入口约定：为什么传函数而不是传实例
 
-主服务以子进程方式启动编译产物，双方用**每行一条 JSON** 通信：
-
-```
-主服务 → 插件  {"id":"c1","method":"upload","config":{...},"input":{...},"timeoutSecs":60}
-插件 → 主服务  {"id":"c1","ok":true,"result":{"url":"https://..."},"traces":[...]}
+```go
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 ```
 
-- `method` 只有三种：`ping`（握手）、`upload`、`check`。
-- 同一插件的调用**串行**执行，插件里不需要自己加锁。
-- 写 stdout 的只能是协议消息；**日志一律写 stderr**（会被收集用于崩溃诊断）。
-- `sdk.Serve(plugin{})` 已经实现了这个循环，正常开发不用关心。
+解释器与宿主分属两套类型系统，**接口值无法跨边界**（把 `plugin{}` 直接交给宿主会丢失方法集），
+函数值则可以无损传递。所以入口固定为「把两个函数交给 `sdk.Serve`」，宿主取回后直接调用。
 
-### 2.3 为什么不是 Go 的 `plugin` 包
+> v2.0 的旧写法 `sdk.Serve(plugin{})` 会在加载时**自动改写**为注册式并写回文件，
+> 升级后不需要手工修改；改写记录会出现在变更日志里。
 
-`plugin` 包要求插件与主程序用完全相同的 Go 版本、相同的依赖版本编译，且只支持 Linux/macOS。
-独立进程方案换来的是：跨平台、插件崩溃不会拖垮主服务、插件可用任意第三方库、单个插件超时可被强杀。
+### 2.3 多文件怎么合并
+
+解释器按「一个包一份源码」执行，服务端会在加载前把目录内所有 `.go` 文件合并：
+
+1. 校验每个文件都是 `package main`，语法错误直接报 `文件名:行:列`；
+2. 去重 import（同一路径不同别名会报错，避免歧义）；
+3. 按文件名顺序拼接声明，去掉重复的 `package` 与 `import` 块；
+4. 交给解释器执行，行号会映射回原始文件。
+
+所以你可以自由拆分文件，不需要 `go.mod`，也不会有「包循环引用」这类问题。
+
+### 2.4 为什么仍然跑在子进程里
+
+解释执行的死循环、栈溢出无法被宿主安全回收。服务端用**自身二进制**启动一个隐藏的
+`__plugin_runner__` 子进程来跑解释器：崩溃或超时可以强杀，重新加载只需重启这个进程。
+因为 runner 就是主程序本身，所以**部署仍然只有一个二进制，不需要 Go 工具链**。
+
+### 2.5 能力边界
+
+| 能力 | 支持情况 |
+| --- | --- |
+| 标准库 | 全部可用（`net/http`、`crypto/*`、`encoding/*`、`os`、`io`、`mime/multipart`…） |
+| 第三方库 | **不支持**。导入非标准库会直接报错并提示改用标准库 |
+| `cgo` | 不支持 |
+| Go 语法 | 基线 Go 1.21；泛型仅基础用法，`range int`、迭代器等新语法可能不被识别 |
+| 并发 | 可以用 goroutine，但请自己保证在 `ctx` 取消后退出；同一插件的调用是串行的 |
+
+绝大多数图床上传、签名、加密需求用标准库都能完成；确实需要第三方 SDK 时，
+把它的核心逻辑（签名算法、请求格式）用标准库重写即可。
 
 ---
 
@@ -100,18 +129,16 @@ func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Ou
 
 导入路径：`github.com/Mr-losfer/s3bridge/sdk`
 
-### 3.1 必须实现的接口
+### 3.1 两个方法 + 一个入口
 
 ```go
-type Uploader interface {
-	// Upload 把文件转发到第三方并返回统一结果。
-	Upload(ctx context.Context, in Input, cfg Config) (*Output, error)
-	// Check 做无副作用探活，不得上传真实业务文件。
-	Check(ctx context.Context, cfg Config) error
-}
-```
+type UploadFunc func(ctx context.Context, in Input, cfg Config) (*Output, error)
+type CheckFunc  func(ctx context.Context, cfg Config) error
 
-`main()` 里只需 `sdk.Serve(plugin{})`。
+// Upload 把文件转发到第三方并返回统一结果。
+// Check  做无副作用探活（不得上传真实业务文件）。
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
+```
 
 ### 3.2 输入与输出
 
@@ -180,49 +207,35 @@ body, contentType := sdk.MultipartStream("file", in.FileName, in.MimeType, f, ma
 
 ## 4. 参数 Schema（plugin.json）
 
-后台参数表单不是手写的，而是由 `plugin.json` 的 `params` 渲染：
-
 ```json
 {
   "schema": 2,
   "id": "my-uploader",
-  "name": "我的上传器",
-  "version": "1.0.0",
-  "entry": "main.go",
-  "timeoutSecs": 60,
-  "priority": 100,
-  "fileTypes": ["image"],
-  "health": { "enabled": true, "intervalSecs": 300, "timeoutSecs": 8, "failThreshold": 2, "probeMode": "ping" },
-  "validity": { "intervalHours": 72 },
+  "name": "我的图床",
   "params": [
-    { "key": "upload_url", "label": "上传地址", "type": "url", "group": "连接", "required": true },
-    { "key": "file_field", "label": "文件字段名", "type": "text", "group": "连接", "default": "file" },
-    { "key": "token", "label": "Bearer Token", "type": "secret", "group": "身份凭据",
-      "sensitive": true, "volatile": true, "expiresField": "token_expires_at" },
-    { "key": "token_expires_at", "label": "Token 过期时间", "type": "datetime", "group": "身份凭据", "volatile": true }
+    { "key": "upload_url", "label": "上传地址", "type": "url", "required": true, "group": "通用" },
+    { "key": "token", "label": "Token", "type": "secret", "sensitive": true, "volatile": true,
+      "expiresField": "token_expires_at", "group": "凭据" },
+    { "key": "token_expires_at", "label": "Token 过期时间", "type": "datetime", "group": "凭据" }
   ]
 }
 ```
 
-字段类型：`text` `secret` `number` `bool` `select` `textarea` `url` `datetime` `duration`。
-
-几个影响行为的标记：
-
-| 标记 | 效果 |
+| 字段 | 说明 |
 | --- | --- |
-| `required` | 缺失时插件状态为异常，调试第一步就失败 |
-| `sensitive` | 后台脱敏展示，落盘前用主密钥 AES-256-GCM 加密，传给插件时已解密 |
-| `volatile` + `expiresField` | 视为临时凭据：到期前 24 小时提醒，过期后直接判为异常 |
-| `group` | 表单分组标题，省略归入「通用」 |
+| `type` | `text` / `secret` / `number` / `bool` / `select` / `textarea` / `url` / `datetime` / `duration` |
+| `required` | 必填校验；留空且非必填时不会触发任何提示 |
+| `sensitive` | 后台脱敏显示，服务端 AES-256-GCM 加密落盘 |
+| `volatile` + `expiresField` | 临时凭据（Token/Cookie），到期前 24 小时提醒；**参数留空时不提醒** |
+| `group` | 后台表单分组，按首次出现顺序排列 |
+| `validity.intervalHours` | 本插件归档图片的巡检间隔覆盖（0 表示跟随系统） |
 
-`validity.intervalHours` 为该插件产出的图片单独指定巡检周期（0 表示跟随系统设置）。
+参数在传给插件前由主服务解密，插件拿到的 `cfg` 就是明文。
 
 ### 通过 MCP 修改清单
 
-```jsonc
-// plugin_manifest_update
-{ "id": "my-uploader", "manifest": { /* 完整 plugin.json 内容，id 会被强制为当前插件 */ } }
-```
+`plugin_manifest_update` 可以改参数 Schema、文件类型、超时、巡检周期，**不会触发重新加载**；
+改完参数记得用 `plugin_params_set` 填值。
 
 ---
 
@@ -233,14 +246,14 @@ body, contentType := sdk.MultipartStream("file", in.FileName, in.MimeType, f, ma
 | 步骤 | 工具 | 说明 |
 | --- | --- | --- |
 | 1 看示例 | `plugin_files` + `plugin_file_read` | 读内置 `workbuddy` 的 `main.go`，就是一份真实可跑的参考实现 |
-| 2 建插件 | `plugin_create` | `{id,name,template,files,params,priority,fileTypes}`，创建即编译 |
-| 3 写代码 | `plugin_file_write` | 写单个文件并**自动重新编译**；失败会保留源码并返回编译器输出 |
-| 4 试编译 | `plugin_validate` | 在临时目录编译一份源码，不落库、不影响运行中的插件 |
+| 2 建插件 | `plugin_create` | `{id,name,template,files,params,priority,fileTypes}`，创建即加载 |
+| 3 写代码 | `plugin_file_write` | 写单个文件并**自动重新加载**；失败会保留源码并返回 `文件:行:列` |
+| 4 试加载 | `plugin_validate` | 在临时目录加载一份源码，不落库、不影响运行中的插件 |
 | 5 加文件 | `plugin_file_write` + `plugin_file_rename` / `plugin_file_delete` | 多文件拆分、改名（入口文件改名会同步 `entry`）、删除 |
 | 6 改清单 | `plugin_manifest_update` | 加参数、改超时、改文件类型、改巡检周期 |
 | 7 配参数 | `plugin_params_set` | 敏感值加密落盘 |
-| 8 编译 | `plugin_build` | 手动触发，返回输出、耗时、产物 SHA-256 |
-| 9 调试 | `plugin_debug` | 参数 → 凭据有效期 → 产物 → 自检，并带回请求追踪 |
+| 8 重新加载 | `plugin_build` | 手动触发，返回加载日志、耗时、源码 SHA-256 |
+| 9 调试 | `plugin_debug` | 参数 → 凭据有效期 → 加载 → 自检，并带回请求追踪 |
 | 10 真传 | `upload_test` | 用 base64 内容走一次真实上传 |
 | 11 备份/迁移 | `plugin_export` | 导出全部源码与清单 |
 
@@ -260,36 +273,46 @@ Agent 不需要你告诉它 SDK 有哪些函数：`plugin_file_read(id="workbudd
 
 ---
 
-## 6. 编译与运行时
+## 6. 执行与运行时
 
-### 6.1 构建环境
+### 6.1 加载流程
 
-- 需要 **Go 1.21+** 工具链在主服务所在主机上可用（`PATH` 里能找到 `go`）。
-  未安装时服务仍可启动，但只能运行已编译好的 `.build/plugin`，后台会显示「未检测到 Go 工具链」。
-- SDK 源码内嵌在二进制里，启动时落盘到 `{数据目录}/sdk/s3bridge-sdk`；
-  插件 `go.mod` 通过 `replace` 指向它，因此**离线也能编译**（不访问网络）。
-- 编译环境会清理外部干扰：固定 `CGO_ENABLED=0`、`GO111MODULE=on`、`GOTOOLCHAIN=local`、
-  `GOFLAGS=-mod=mod`、`GOWORK=off`，`GOCACHE`/`GOMODCACHE`/`GOPATH` 全部落在 `{数据目录}/cache`。
-- 引入第三方库时编译器会提示缺少 `go.sum`，服务端自动执行一次 `go mod tidy` 后重试（需要网络）。
+| 阶段 | 做什么 | 典型耗时 |
+| --- | --- | --- |
+| 入口升级 | 把 `sdk.Serve(x)` 改写为 `sdk.Serve(x.Upload, x.Check)` | < 1ms |
+| 合并校验 | 解析每个 `.go`、检查 package 与 import、合并成一份源码 | < 2ms |
+| 解释执行 | yaegi 执行包级声明与 `main`，拿到注册的两个函数 | ~10ms |
+| 握手 | 向 runner 进程发 `ping`，确认入口已注册 | < 5ms |
+
+以上是串行总耗时，实测一次完整的「保存 → 生效」约 **10–15 ms**（含进程启动）；进程已在运行时，
+手工点「重新加载」也是同一量级。作为对比，v2.0 的 `go build` 每次约 7 秒。
+
+失败时返回的错误会带上**原始文件名与行号**，例如：
+
+```
+main.go:58:6: undefined: notDefined
+main.go:63:58: expected '}', found 'EOF'
+main.go: 不支持导入 "github.com/pkg/errors" —— 内嵌解释器只提供标准库
+```
 
 ### 6.2 运行时
 
 | 行为 | 说明 |
 | --- | --- |
-| 启动 | 首次调用时懒编译；之后直接复用 `.build/plugin` |
-| 握手 | 启动后先发 `ping`，确认产物可用，避免把坏二进制当成业务错误 |
+| 加载 | 保存源码即加载；启动时后台预加载已启用插件，首次上传不必等 |
+| 隔离 | 每个插件一个 runner 子进程（主程序自身的隐藏子命令） |
 | 并发 | 同一插件的调用串行，不同插件并行 |
 | 超时 | `plugin.json` 的 `timeoutSecs`（默认 60，最大 600）；超时直接 kill 进程，下次调用自动重启 |
 | 崩溃 | 进程退出后记录 stderr 末尾，状态置为异常并告警；下次调用重新拉起 |
-| 回收 | 10 分钟无调用回收子进程，释放内存 |
-| 热切换 | 编译成功后立即丢弃旧进程，下一次调用加载新代码 |
+| 回收 | 10 分钟无调用回收子进程，释放约 20–30 MB 内存 |
+| 热切换 | 重新加载成功后立即丢弃旧进程，下一次调用跑新代码 |
 
 ### 6.3 健康检测
 
 `Check` 会被按插件独立配置的周期调用（默认 300 秒，可关闭）。失败不会立刻判死：
 连续失败达到 `failThreshold` 才标记异常并生成告警，恢复后自动关闭未确认告警。
 若插件声明了 `volatile` 凭据且过期时间未设置或已过期，即使 `Check` 成功也会被判为异常——
-这是故意的：Token 过期是这类插件最常见的故障。
+这是故意的：Token 过期是这类插件最常见的故障。参数留空时不会告警。
 
 ---
 
@@ -301,7 +324,7 @@ Agent 不需要你告诉它 SDK 有哪些函数：`plugin_file_read(id="workbudd
 | --- | --- |
 | 参数校验 | 必填、类型、URL、枚举、正则、时间格式 |
 | 临时凭据有效期 | 读取 `expiresField`，提示剩余时间或已过期 |
-| 编译产物 | 产物是否存在，缺失时补编译 |
+| 插件加载 | 源码是否已加载、入口是否注册，失败时给出源码错误 |
 | 插件自检 | 真实调用 `Check`，返回耗时与产生的请求数 |
 
 同时返回**请求追踪**：每次出站请求的方法、URL、状态码、耗时、请求/响应字节数、
@@ -331,18 +354,28 @@ Agent 不需要你告诉它 SDK 有哪些函数：`plugin_file_read(id="workbudd
 
 ## 9. 常见问题
 
-**编译失败：`expected 'package', found 'EOF'`**
-新建了空 `.go` 文件。后台新建 `.go` 会写入骨架，脚本直接调用 API 时需要自己写 `package main`。
+**加载失败：`expected '}', found 'EOF'`**
+大括号没闭合。错误会带 `文件:行:列`，按位置补上即可。
 
-**编译失败：`missing go.sum entry`**
-插件引入了第三方库。服务端会自动 `go mod tidy` 重试一次；离线环境请改用标准库。
+**加载失败：`undefined: xxx`**
+用了未定义的变量或函数，或者忘了写在哪个文件里。多文件会合并执行，不需要 import 同包文件。
 
-**`未找到 go 命令`**
-主机没装 Go 工具链。装上 Go 1.21+ 后重启服务，或在别处编译好 `.build/plugin` 拷过来。
+**加载失败：`不支持导入 "github.com/..."`**
+插件只能用标准库。把第三方库的核心逻辑（签名、请求格式）用标准库重写；
+实在绕不开可以先用 `http.NewRequest` 手工构造请求。
+
+**加载失败：`没有找到入口`**
+`main()` 里必须调用 `sdk.Serve(plugin{}.Upload, plugin{}.Check)`。
+只写方法不注册，宿主拿不到实现。
 
 **插件一直「异常」，但调试显示自检通过**
 `volatile` 凭据过期时间没填或已过期。到参数页补 `token_expires_at`。
 参数留空时不会告警 —— 可选凭据没配置属于「未启用」，不算过期。
+
+**从 v2.0 升级要注意什么**
+只有一个变化：入口从 `sdk.Serve(plugin{})` 变成 `sdk.Serve(plugin{}.Upload, plugin{}.Check)`。
+服务端会在加载时自动改写并写回文件，通常你不需要做任何事；
+如果改写失败（例如入口写法过于特殊），错误信息会给出确切的修改方法。
 
 **v1.x 的声明式插件去哪了**
 升级后自动迁移，规则如下：
@@ -352,12 +385,10 @@ Agent 不需要你告诉它 SDK 有哪些函数：`plugin_file_read(id="workbudd
 | 内置插件（workbuddy） | 变成同名文件夹，源码就是内置 Go 实现，参数与健康设置保留 |
 | 自定义声明式插件 | 生成 `main.go` 骨架，原 JSON 留档到 `legacy-definition.json` |
 | 参数与文件类型 | 全部保留：参数键按名称推断类型（含 key/token/secret 的标为敏感），旧的 `enc:` 密文继续可解密 |
-| 启用状态 | **迁移后自动停用**，状态说明「请用 Go 重写 main.go，编译通过后启用」 |
+| 启用状态 | **迁移后自动停用**，状态说明「请用 Go 重写 main.go，加载通过后启用」 |
 
 之所以停用，是因为骨架里的 `Upload` 只会返回「尚未实现」，留着启用会被调度到然后必然失败。
-重写 `main.go`、保存并编译通过后，到「调度设置」里手动启用即可。
-
-声明式模板引擎已移除，需要按本文档用 Go 重写 —— 好消息是能表达的东西不再受限。
+重写 `main.go`、保存并加载通过后，到「调度设置」里手动启用即可。
 
 **内置插件能改吗**
 能。源码在 `{数据目录}/plugins/workbuddy/`，改完保存即生效；升级不会覆盖你改过的文件

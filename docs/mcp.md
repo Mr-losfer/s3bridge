@@ -96,15 +96,15 @@ curl -s -X POST http://localhost:8080/mcp \
 | `plugin_list` | 插件列表，**按调度权重降序**（即实际使用顺序），含状态/版本/可承接文件类型/参数警告 | — |
 | `plugin_get` | 单个插件详情：参数 Schema、分组、脱敏后的当前值 | `id` |
 | `plugin_registry` | 内置 Go 插件模板清单与完整参数 Schema，并列出所有自定义插件 | — |
-| `plugin_create` | **创建 Go 插件**：生成 `plugin.json` + `main.go` 骨架并立即编译；可覆盖任意源码文件 | `id` `name` `version` `description` `author` `template` `files` `params` `enabled` `priority` `fileTypes` `timeoutSecs` |
+| `plugin_create` | **创建插件**：生成 `plugin.json` + `main.go` 骨架并立即加载（内嵌解释器，无需 Go 工具链）；可覆盖任意源码文件 | `id` `name` `version` `description` `author` `template` `files` `params` `enabled` `priority` `fileTypes` `timeoutSecs` |
 | `plugin_files` | **列出插件文件夹**：文件名、大小、是否入口、是否系统维护（只读） | `id` |
-| `plugin_file_read` | **读取单个文件**：`.go` 源码、`plugin.json` 清单、`go.mod` 都能读 | `id` `name` |
-| `plugin_file_write` | **写入文件并自动编译**：编译失败保留源码并返回编译器输出，供下一轮修复 | `id` `name` `content` |
-| `plugin_file_delete` | 删除文件（至少保留一个 `.go`），删除后自动重新编译 | `id` `name` |
+| `plugin_file_read` | **读取单个文件**：`.go` 源码或 `plugin.json` 清单 | `id` `name` |
+| `plugin_file_write` | **写入文件并自动加载**：加载失败保留源码并返回「文件:行:列」错误，供下一轮修复 | `id` `name` `content` |
+| `plugin_file_delete` | 删除文件（至少保留一个 `.go`），删除后自动重新加载 | `id` `name` |
 | `plugin_file_rename` | 重命名文件；入口文件改名会同步清单 `entry` | `id` `from` `to` |
-| `plugin_build` | **手动编译**：返回编译器输出、耗时、产物大小与 SHA-256 | `id` |
-| `plugin_validate` | **试编译**（不落库）：在临时目录编译给定源码，返回编译器输出；`id` 可复用现有清单 | `id` `files` `manifest` |
-| `plugin_manifest_update` | **更新清单**：参数 Schema、文件类型、超时、图片有效性周期；不触发重新编译 | `id` `manifest` |
+| `plugin_build` | **手动重新加载**：返回加载日志、耗时、源码 SHA-256 与文件数 | `id` |
+| `plugin_validate` | **试加载**（不落库）：在临时目录加载给定源码，返回校验结果；`id` 可复用现有清单 | `id` `files` `manifest` |
+| `plugin_manifest_update` | **更新清单**：参数 Schema、文件类型、超时、图片有效性周期；不触发重新加载 | `id` `manifest` |
 | `plugin_export` | **导出全部源码与清单**，可在另一实例逐文件写回复刻 | `id` |
 | `plugin_delete` | **删除自定义插件**（内置插件只能停用），变更记录保留 | `id` |
 | `plugin_docs` | 插件开发文档全文 + 实时参数模板 | `topic` |
@@ -116,7 +116,7 @@ curl -s -X POST http://localhost:8080/mcp \
 | `plugin_toggle` | 启用/停用插件 | `id` `enabled` |
 | `plugin_health_check` | 立即执行一次健康检测并更新状态/告警 | `id` |
 | `plugin_health_config` | **每插件独立定时检测**：间隔、超时、失败阈值、探活模式 | `id` `enabled` `intervalSecs` `timeoutSecs` `failThreshold` `probeMode` |
-| `plugin_changes` | 变更记录（创建/写文件/改名/编译/清单/调试/参数修改/删除审计） | `id` `limit` |
+| `plugin_changes` | 变更记录（创建/写文件/改名/加载/清单/调试/参数修改/删除审计） | `id` `limit` |
 | `plugin_parse_token` | 解析 WorkBuddy Bearer Token 的 `exp` 与 `sub`，自动得到过期时间与 `x-user-id` | `authorization` |
 | `s3_docs` | S3 开放接口文档 | — |
 | `installation_docs` | 安装部署文档 | — |
@@ -246,8 +246,9 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ### 从零开发一个插件（Agent 完全掌控）
 
-插件是真正的 Go 程序：一个文件夹（`plugin.json` + 任意多个 `.go`），服务端运行时 `go build` 编译成独立进程调用。
-**签名、换 token、PUT 直传、分片、加密请求体**都可以写，不再受模板能力限制。详情见[插件开发文档](plugin-development.md)。
+插件就是一个文件夹（`plugin.json` + 任意多个 `.go`），服务端用**内嵌的 Go 解释器**直接执行源码，
+**不需要 Go 工具链、不需要编译**——写完保存就生效（典型 10 ms 内）。解释器只提供标准库，因此
+**签名、换 token、PUT 直传、分片、加密请求体**都可以写，不受模板能力限制。详情见[插件开发文档](plugin-development.md)。
 
 **① 读一份真实可跑的参考实现**（内置 WorkBuddy 就是普通插件文件夹）：
 
@@ -256,7 +257,7 @@ curl -s -X POST http://localhost:8080/mcp \
 {"name":"plugin_file_read","arguments":{"id":"workbuddy","name":"main.go"}}
 ```
 
-**② 创建插件并编译**（`files` 可覆盖模板文件；不传则用 `template` 生成的骨架）：
+**② 创建插件**（`files` 可覆盖模板文件；不传则用 `template` 生成的骨架）：
 
 ```json
 {
@@ -273,17 +274,18 @@ curl -s -X POST http://localhost:8080/mcp \
 }
 ```
 
-**③ 写代码并自动编译**：`plugin_file_write` 每次写入 `.go` 都会立即编译，
-失败时 `build.ok=false` 且 `build.output` 是原始编译器输出，源码会保留供下一轮修复：
+**③ 写代码并自动生效**：`plugin_file_write` 每次写入 `.go` 都会立即重新加载，
+失败时 `build.ok=false` 且 `build.output` 带「文件:行:列」错误，源码会保留供下一轮修复：
 
 ```json
-{"name":"plugin_file_write","arguments":{"id":"my-uploader","name":"main.go","content":"package main\n\nimport (\n\t\"context\"\n\t\"github.com/Mr-losfer/s3bridge/sdk\"\n)\n\ntype plugin struct{}\n\nfunc (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {\n\treturn &sdk.Output{URL: cfg[\"upload_url\"] + \"/\" + in.FileName}, nil\n}\n\nfunc (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }\n\nfunc main() { sdk.Serve(plugin{}) }\n"}}
+{"name":"plugin_file_write","arguments":{"id":"my-uploader","name":"main.go","content":"package main\n\nimport (\n\t\"context\"\n\t\"github.com/Mr-losfer/s3bridge/sdk\"\n)\n\ntype plugin struct{}\n\nfunc (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {\n\treturn &sdk.Output{URL: cfg[\"upload_url\"] + \"/\" + in.FileName}, nil\n}\n\nfunc (plugin) Check(ctx context.Context, cfg sdk.Config) error { return nil }\n\nfunc main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }\n"}}
 ```
 
 多文件拆分用 `plugin_file_write` 写新文件名即可；改名用 `plugin_file_rename`（入口改名会同步 `entry`），
-删除用 `plugin_file_delete`（至少保留一个 `.go`）。
+删除用 `plugin_file_delete`（至少保留一个 `.go`）。旧插件里的 `sdk.Serve(plugin{})` 单参写法
+会在加载时被自动改写成上面这种双参形式，无需手工迁移。
 
-**④ 试编译 → 改清单 → 配参数 → 调试 → 真实上传**：
+**④ 试加载 → 改清单 → 配参数 → 调试 → 真实上传**：
 
 ```json
 {"name":"plugin_validate","arguments":{"id":"my-uploader","files":{"main.go":"<源码>"}}}
@@ -343,7 +345,7 @@ curl -s -X POST http://localhost:8080/mcp \
 - 所有写操作都要求对应权限；`plugin_debug` 需要 `plugin:debug`，`system_settings_update` 与 `system_update_apply` 需要 `system:manage`，`user_*` 需要 `user:manage`。
 - `system_update_apply` 会替换服务自身的可执行文件，因此额外要求：Release 必须带 `checksums.txt` 且 SHA256 匹配、下载域名在白名单内、服务已启用自重启能力；任一条件不满足都会中止并回滚。
 - 工具返回的敏感参数一律脱敏；SecretAccessKey 明文只在 `apikey_create` / `apikey_reveal` 与后台「API 密钥」页、「MCP 能力」页顶部出现，且仅密钥本人或管理员登录后可取回。密钥列表始终只返回 `secretHint` 脱敏前缀。
-- 插件源码写入有多重约束：文件名拒绝路径穿越，只允许文本类扩展名，单文件 512 KB、总量 2 MB、最多 64 个文件；编译在子进程内完成，`CGO_ENABLED=0`，超时会被强杀。
+- 插件源码写入有多重约束：文件名拒绝路径穿越，只允许文本类扩展名，单文件 512 KB、总量 2 MB、最多 64 个文件；加载在独立的 runner 子进程内完成，死循环或超时会被强杀重启。
 - 插件以**子进程**运行，崩溃或超时不会影响主服务；同一插件的调用串行执行，插件里无需自行加锁。
 - 请求追踪只保留脱敏后的头部与 512 字节响应片段，不会把凭据写进日志或接口返回。
 - 每次变更都会写入 `ChangeLog`，记录 actor（MCP 调用者用户名）、动作与 diff，可在后台或 `plugin_changes` 中回溯。

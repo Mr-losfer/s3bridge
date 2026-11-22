@@ -14,13 +14,24 @@ import (
 	"github.com/Mr-losfer/s3bridge/internal/api"
 	"github.com/Mr-losfer/s3bridge/internal/app"
 	"github.com/Mr-losfer/s3bridge/internal/config"
+	"github.com/Mr-losfer/s3bridge/internal/plugin/engine"
 	"github.com/Mr-losfer/s3bridge/internal/updater"
 )
 
 // version 由 -ldflags "-X main.version=..." 注入。
 var version = "dev"
 
+// runnerArg 是插件解释执行子进程的隐藏入口。
+// 必须在读取配置之前拦截：runner 只需要插件目录，不该依赖任何环境变量。
+const runnerArg = "__plugin_runner__"
+
 func main() {
+	if len(os.Args) >= 3 && os.Args[1] == runnerArg {
+		if err := engine.Run(os.Args[2], os.Stdin, os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "s3bridge:", err)
 		os.Exit(1)
@@ -42,7 +53,7 @@ func run() error {
 
 	rootCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	// 后台预编译插件：把编译耗时挪出上传链路，首次上传不再等 6 秒。
+	// 后台预加载插件：让首次上传不必等待解释器初始化。
 	core.WarmPlugins(rootCtx)
 	core.Validity.Start(rootCtx)
 	if err := core.Health.Start(rootCtx); err != nil {

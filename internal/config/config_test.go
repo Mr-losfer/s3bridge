@@ -31,8 +31,8 @@ func TestLoadNormalizesPaths(t *testing.T) {
 	}
 	for name, path := range map[string]string{
 		"DataDir": cfg.DataDir, "ObjectDir": cfg.ObjectDir, "ObsDir": cfg.ObsDir,
-		"PluginsDir": cfg.PluginsDir, "PluginCacheDir": cfg.PluginCacheDir,
-		"ThumbDir": cfg.ThumbDir,
+		"PluginsDir": cfg.PluginsDir,
+		"ThumbDir":   cfg.ThumbDir,
 	} {
 		if !filepath.IsAbs(path) {
 			t.Fatalf("%s 不是绝对路径: %q", name, path)

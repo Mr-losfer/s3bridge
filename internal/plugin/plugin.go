@@ -1,14 +1,15 @@
-// Package plugin 管理 Go 插件：文件夹布局、构建、子进程调用与实例生命周期。
+// Package plugin 管理 Go 插件：文件夹布局、加载、子进程调用与实例生命周期。
 //
 // 一个插件 = 一个文件夹：
 //
 //	{DataDir}/plugins/{id}/
 //	├── plugin.json   # 元信息、参数 Schema、调度与健康配置
-//	├── main.go       # 入口：sdk.Serve(...)
+//	├── main.go       # 入口：sdk.Serve(plugin{}.Upload, plugin{}.Check)
 //	└── *.go          # 任意多个源文件，可 import 整个标准库
 //
-// 源码由运行时用本机 Go 工具链编译为独立可执行文件，主服务以子进程方式调用。
-// 插件拥有完整 Go 能力：任意次 HTTP 请求、任意方法、任意加解密。
+// 源码由服务端内嵌的 Go 解释器直接执行（见 internal/plugin/engine），
+// 不需要安装 Go 工具链，保存即生效；执行体是主程序自身派生的 runner 子进程。
+// 插件拥有完整标准库能力：任意次 HTTP 请求、任意方法、任意加解密。
 package plugin
 
 import (
@@ -26,8 +27,6 @@ var (
 	ErrUpstream       = errors.New("第三方接口返回异常")
 	// ErrFileTypeUnsupported 表示显式指定的插件不承接当前文件类型。
 	ErrFileTypeUnsupported = errors.New("插件不支持该文件类型")
-	ErrNoToolchain         = errors.New("未找到 Go 工具链")
-	ErrBuildFailed         = errors.New("插件编译失败")
 	ErrSourceInvalid       = errors.New("插件源码不合法")
 )
 

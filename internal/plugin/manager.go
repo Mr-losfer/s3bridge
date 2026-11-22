@@ -22,7 +22,7 @@ type Builtin struct {
 	Files map[string]string
 }
 
-// Manager 负责插件实例生命周期：文件夹、构建、调用、参数、调度与告警。
+// Manager 负责插件实例生命周期：文件夹、加载、调用、参数、调度与告警。
 type Manager struct {
 	st           store.Store
 	rt           *runtime.Runtime
@@ -42,7 +42,7 @@ func NewManager(st store.Store, rt *runtime.Runtime, pluginsDir string, seal, op
 
 func (m *Manager) Store() store.Store { return m.st }
 
-// Runtime 暴露运行时信息（工具链、构建等），供 API 展示与测试使用。
+// Runtime 暴露执行引擎信息，供 API 展示与测试使用。
 func (m *Manager) Runtime() *runtime.Runtime { return m.rt }
 
 // View 是插件列表/详情的对外视图，敏感参数已脱敏。
@@ -120,9 +120,6 @@ func (m *Manager) ensureBuiltin(b Builtin) error {
 	if err != nil {
 		return fmt.Errorf("内置插件 %s 清单无效: %w", b.ID, err)
 	}
-	if err := EnsureGoMod(dir, b.ID, m.rt.SDKPath()); err != nil {
-		return err
-	}
 
 	// 同步存储：保留用户参数、调度与健康设置，只更新描述性字段。
 	err = m.st.Update(func(st *store.State) error {
@@ -199,13 +196,12 @@ func (m *Manager) migrateLegacy() error {
 				},
 				Params: legacyParamFields(p.Params),
 				Docs: "该插件由 v1.x 的声明式定义迁移而来。原定义见 legacy-definition.json。\n\n" +
-					"声明式请求模板已不再支持，请在 main.go 中用 Go 实现上传逻辑，保存并编译通过后手动启用。",
+					"声明式请求模板已不再支持，请在 main.go 中用 Go 实现上传逻辑，保存并加载通过后手动启用。",
 			}
 			_ = os.MkdirAll(dir, 0o700)
 			_ = SaveManifest(dir, mf)
 			_ = writeFileAtomic(filepath.Join(dir, "legacy-definition.json"), []byte(p.Definition))
 			_ = writeFileAtomic(filepath.Join(dir, "main.go"), []byte(blankMain))
-			_ = EnsureGoMod(dir, p.ID, m.rt.SDKPath())
 			if err := m.st.Update(func(st *store.State) error {
 				cur := store.PluginByID(st, p.ID)
 				if cur == nil {
@@ -217,7 +213,7 @@ func (m *Manager) migrateLegacy() error {
 				// 停用并写明原因，等用户重写后自己开启。
 				cur.Enabled = false
 				cur.Status = store.StatusDisabled
-				cur.StatusMessage = "声明式引擎已移除：请用 Go 重写 main.go，编译通过后启用"
+				cur.StatusMessage = "声明式引擎已移除：请用 Go 重写 main.go，加载通过后启用"
 				cur.UpdatedAt = store.NowUTC()
 				st.Changes = append(st.Changes, newChange(p.ID, "migrate", "system", nil, "声明式插件迁移为 Go 骨架，已停用等待重写"))
 				return nil
@@ -288,8 +284,8 @@ func looksSecret(key string) bool {
 	return false
 }
 
-// Warmup 预编译「已启用但产物缺失」的插件。
-// 目的是把编译耗时从「首次上传」挪到启动后的空闲时间：上传链路上不能出现几秒的抖动。
+// Warmup 预加载已启用的插件。
+// 解释执行只要几毫秒，但仍然放在后台：启动阶段不该被任何插件源码拖住。
 func (m *Manager) Warmup(ctx context.Context) {
 	if m.rt == nil || m.rt.Toolchain() == "" {
 		return
@@ -308,25 +304,19 @@ func (m *Manager) Warmup(ctx context.Context) {
 			return
 		}
 		dir := m.dirOf(&p)
-		if m.builtExists(dir) {
-			continue
-		}
-		// 源码本身不完整时不在启动阶段反复编译，等用户显式触发并看到编译器输出。
+		// 源码不完整时不在启动阶段反复加载，等用户显式触发并看到错误。
 		if _, err := LoadManifest(dir); err != nil {
 			continue
 		}
-		if err := EnsureGoMod(dir, p.ID, m.rt.SDKPath()); err != nil {
-			continue
-		}
 		start := time.Now()
-		res, err := m.rt.Build(ctx, p.ID, dir)
+		res, err := m.rt.Load(ctx, p.ID, dir)
 		m.setBuildState(p.ID, res, err)
 		if err != nil {
-			slog.Warn("插件预编译失败", "plugin", p.ID, "err", err)
+			slog.Warn("插件预加载失败", "plugin", p.ID, "err", err)
 			continue
 		}
-		slog.Info("插件预编译完成", "plugin", p.ID,
-			"ms", time.Since(start).Milliseconds(), "size", res.Size)
+		slog.Info("插件预加载完成", "plugin", p.ID,
+			"ms", time.Since(start).Milliseconds(), "files", res.Files)
 	}
 }
 
@@ -381,12 +371,8 @@ func (m *Manager) dirOf(p *store.Plugin) string {
 func (m *Manager) viewOf(p *store.Plugin) View {
 	dir := m.dirOf(p)
 	view := View{Plugin: *p, Params: map[string]any{}, Grouped: []ParamGroup{}, Editable: p.Custom}
-	view.Toolchain = m.rt != nil && m.rt.Toolchain() != ""
-	if m.rt != nil {
-		if fi, err := os.Stat(filepath.Join(dir, ".build", "plugin")); err == nil && fi.Size() > 0 {
-			view.Built = true
-		}
-	}
+	view.Toolchain = m.rt != nil
+	view.Built = p.BuildSHA != "" && p.BuildError == ""
 	mf, err := LoadManifest(dir)
 	if err != nil {
 		view.Warning = fmt.Sprintf("插件清单不可用：%v", err)
@@ -416,7 +402,7 @@ func (m *Manager) viewOf(p *store.Plugin) View {
 		if view.Warning != "" {
 			view.Warning += "；"
 		}
-		view.Warning += "最近一次构建失败：" + truncateMsg(p.BuildError, 160)
+		view.Warning += "最近一次加载失败：" + truncateMsg(p.BuildError, 160)
 	}
 	return view
 }
@@ -466,14 +452,14 @@ func (m *Manager) Upload(ctx context.Context, id string, req UploadRequest) (*Up
 	if err != nil {
 		return nil, err
 	}
-	if p.BuildError != "" && !m.builtExists(dir) {
-		return nil, fmt.Errorf("插件尚未成功构建：%s", p.BuildError)
+	if p.BuildError != "" {
+		return nil, fmt.Errorf("插件尚未成功加载：%s", p.BuildError)
 	}
 	if m.rt == nil {
 		return nil, errors.New("插件运行时未初始化")
 	}
 	buildCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = m.rt.EnsureBuilt(buildCtx, id, dir)
+	err = m.rt.EnsureLoaded(buildCtx, id, dir)
 	cancel()
 	if err != nil {
 		return nil, fmt.Errorf("插件未就绪: %w", err)
@@ -525,7 +511,7 @@ func (m *Manager) Check(ctx context.Context, id string) error {
 	if timeout <= 0 {
 		timeout = 8 * time.Second
 	}
-	// 首次调用前先确保编译完成：编译可能耗时数秒，不能占用健康检测的超时预算。
+	// 首次调用前先确保插件已加载：加载失败要报出源码错误，而不是掩成超时。
 	start := time.Now()
 	var checkErr error
 	if m.rt == nil {
@@ -590,7 +576,7 @@ func (m *Manager) Check(ctx context.Context, id string) error {
 	})
 }
 
-// Debug 执行无副作用诊断：参数 → 凭据有效期 → 构建 → 插件自检，并带回请求追踪。
+// Debug 执行无副作用诊断：参数 → 凭据有效期 → 加载 → 插件自检，并带回请求追踪。
 func (m *Manager) Debug(ctx context.Context, id string) (DebugReport, error) {
 	p, mf, cfg, dir, err := m.loadRunnable(id)
 	if err != nil {
@@ -621,11 +607,11 @@ func (m *Manager) Debug(ctx context.Context, id string) (DebugReport, error) {
 
 	start = time.Now()
 	if m.rt == nil {
-		add("编译产物", "fail", "插件运行时未初始化", start)
-	} else if err := m.rt.EnsureBuilt(ctx, id, dir); err != nil {
-		add("编译产物", "fail", err.Error(), start)
+		add("插件加载", "fail", "插件运行时未初始化", start)
+	} else if err := m.rt.EnsureLoaded(ctx, id, dir); err != nil {
+		add("插件加载", "fail", err.Error(), start)
 	} else {
-		add("编译产物", "pass", "可执行文件就绪", start)
+		add("插件加载", "pass", "源码已加载，入口已注册", start)
 	}
 
 	start = time.Now()
@@ -1041,22 +1027,14 @@ func (m *Manager) Eligible(category store.FileCategory) []string {
 
 // ---------- 辅助 ----------
 
-// buildIfMissing 在二进制缺失时编译，给足 2 分钟预算并复用同一份 GOCACHE。
+// buildIfMissing 确保插件进程已加载，给足 2 分钟预算。
 func (m *Manager) buildIfMissing(ctx context.Context, id, dir string) error {
-	if m.builtExists(dir) {
-		return nil
-	}
 	buildCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	return m.rt.EnsureBuilt(buildCtx, id, dir)
+	return m.rt.EnsureLoaded(buildCtx, id, dir)
 }
 
-func (m *Manager) builtExists(dir string) bool {
-	fi, err := os.Stat(runtime.BinaryPath(dir))
-	return err == nil && fi.Size() > 0
-}
-
-func (m *Manager) setBuildState(id string, res *runtime.BuildResult, err error) {
+func (m *Manager) setBuildState(id string, res *runtime.LoadResult, err error) {
 	_ = m.st.Update(func(st *store.State) error {
 		p := store.PluginByID(st, id)
 		if p == nil {
@@ -1067,7 +1045,7 @@ func (m *Manager) setBuildState(id string, res *runtime.BuildResult, err error) 
 			p.BuildError = truncateMsg(err.Error(), 500)
 			if p.Status != store.StatusDisabled {
 				p.Status = store.StatusUnhealthy
-				p.StatusMessage = "构建失败：" + truncateMsg(err.Error(), 200)
+				p.StatusMessage = "加载失败：" + truncateMsg(err.Error(), 200)
 			}
 		} else {
 			p.BuildError = ""
@@ -1075,7 +1053,7 @@ func (m *Manager) setBuildState(id string, res *runtime.BuildResult, err error) 
 			p.BuildSHA = res.SHA256
 			if p.Status == store.StatusUnhealthy {
 				p.Status = store.StatusUnknown
-				p.StatusMessage = "构建成功，等待健康检测"
+				p.StatusMessage = "加载成功，等待健康检测"
 			}
 		}
 		p.UpdatedAt = now
@@ -1268,7 +1246,7 @@ func convertTraces(in []sdk.Trace) []Trace {
 
 func newCallID() string { return "c" + randomHex(6) }
 
-func shortLog(res *runtime.BuildResult) string {
+func shortLog(res *runtime.LoadResult) string {
 	if res == nil {
 		return ""
 	}

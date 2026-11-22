@@ -143,9 +143,9 @@ func (s *Server) Tools() []Tool {
 			InputSchema: schema(map[string]any{"id": id, "limit": numProp("返回条数")})},
 		{Name: "plugin_parse_token", Description: "解析 WorkBuddy Bearer Token 的 exp 与 sub，自动得到过期时间与 x-user-id",
 			InputSchema: schema(map[string]any{"authorization": strProp("Bearer Token 或完整 Authorization 头")}, "authorization")},
-		{Name: "plugin_registry", Description: "查看已编译进服务端的插件类型清单与完整参数 Schema，用于开发新插件",
+		{Name: "plugin_registry", Description: "查看内置插件模板清单与完整参数 Schema，用于开发新插件",
 			InputSchema: schema(map[string]any{})},
-		{Name: "plugin_create", Description: "创建 Go 插件：生成 plugin.json + main.go 骨架并立即编译。插件是真正的 Go 程序，可用全部标准库（任意请求、PUT、加解密）",
+		{Name: "plugin_create", Description: "创建 Go 插件：生成 plugin.json + main.go 骨架并立即加载。服务端内嵌解释器执行源码，不需要 Go 工具链，可用全部标准库（任意请求、PUT、加解密）",
 			InputSchema: schema(map[string]any{
 				"id":   strProp("插件 ID，全局唯一，小写字母开头，如 my-uploader"),
 				"name": strProp("显示名称"), "description": strProp("说明"),
@@ -162,23 +162,23 @@ func (s *Server) Tools() []Tool {
 			InputSchema: schema(map[string]any{"id": id}, "id")},
 		{Name: "plugin_file_read", Description: "读取单个插件文件；plugin.json 与 go.mod 只读，可用于了解参数 Schema 与模块配置",
 			InputSchema: schema(map[string]any{"id": id, "name": strProp("文件名，如 main.go")}, "id", "name")},
-		{Name: "plugin_file_write", Description: "写入插件文件并自动编译（.go 文件）；编译失败会保留源码并返回编译器输出，供下一轮修复",
+		{Name: "plugin_file_write", Description: "写入插件文件并自动加载（.go 文件）；加载失败会保留源码并返回「文件:行:列」错误，供下一轮修复",
 			InputSchema: schema(map[string]any{
 				"id": id, "name": strProp("文件名，如 main.go"), "content": strProp("完整文件内容"),
 			}, "id", "name", "content")},
-		{Name: "plugin_file_delete", Description: "删除插件文件（至少保留一个 .go 文件），删除后自动重新编译",
+		{Name: "plugin_file_delete", Description: "删除插件文件（至少保留一个 .go 文件），删除后自动重新加载",
 			InputSchema: schema(map[string]any{"id": id, "name": strProp("文件名")}, "id", "name")},
 		{Name: "plugin_file_rename", Description: "重命名插件文件；若重命名的是入口文件，会同步更新 plugin.json 的 entry",
 			InputSchema: schema(map[string]any{"id": id, "from": strProp("原文件名"), "to": strProp("新文件名")}, "id", "from", "to")},
-		{Name: "plugin_build", Description: "重新编译插件并返回编译器输出、耗时与产物 SHA-256；用于手工触发或排查构建环境",
+		{Name: "plugin_build", Description: "重新加载插件并返回加载日志、耗时与源码 SHA-256；用于手工触发或排查",
 			InputSchema: schema(map[string]any{"id": id}, "id")},
-		{Name: "plugin_validate", Description: "在临时目录编译一份插件源码（不落库、不影响运行中的插件），返回编译结果与错误输出",
+		{Name: "plugin_validate", Description: "在临时目录加载一份插件源码（不落库、不影响运行中的插件），返回加载结果与错误输出",
 			InputSchema: schema(map[string]any{
 				"id":       strProp("可选：以现有插件的清单为基准"),
 				"files":    objProp("文件名 → 源码；至少包含一个 .go"),
 				"manifest": objProp("可选清单覆盖（params/timeoutSecs/fileTypes 等）"),
 			}, "files")},
-		{Name: "plugin_manifest_update", Description: "更新插件清单：参数 Schema、文件类型、超时、图片有效性周期等；不触发重新编译",
+		{Name: "plugin_manifest_update", Description: "更新插件清单：参数 Schema、文件类型、超时、图片有效性周期等；不触发重新加载",
 			InputSchema: schema(map[string]any{"id": id, "manifest": objProp("完整 Manifest（id 会被强制为当前插件）")}, "id", "manifest")},
 		{Name: "plugin_export", Description: "导出插件全部源码与清单，便于备份、迁移或在另一实例重建",
 			InputSchema: schema(map[string]any{"id": id}, "id")},
@@ -569,7 +569,7 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 				"registry":      plugin.BuiltinTemplates(),
 				"customPlugins": custom,
 				"permissions":   store.AllPermissions,
-				"note":          "registry 是编译进二进制的插件模板；customPlugins 由 plugin_create 创建，源码文件用 plugin_file_write 即时修改并自动重新编译。",
+				"note":          "registry 是随二进制发布的内置插件模板；customPlugins 由 plugin_create 创建，源码文件用 plugin_file_write 即时修改并自动重新加载。",
 			})
 		}
 		v, err := c.Plugins.Get(argString(args, "id"))
@@ -786,7 +786,7 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 		reload()
 		return ok(map[string]any{
 			"plugin": summary(v), "created": v.ID,
-			"next": "用 plugin_file_write 修改 main.go → plugin_build 查看编译结果 → plugin_debug 查看请求追踪 → upload_test 验证",
+			"next": "用 plugin_file_write 修改 main.go → plugin_build 查看加载结果 → plugin_debug 查看请求追踪 → upload_test 验证",
 		})
 
 	case "plugin_files":
@@ -823,7 +823,7 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 		reload()
 		res := map[string]any{"plugin": summary(v), "build": report}
 		if report != nil && !report.OK {
-			res["error"] = "编译失败，源码已保存；请按 output 修复后再次写入"
+			res["error"] = "加载失败，源码已保存；请按 output 修复后再次写入"
 		}
 		return ok(res)
 

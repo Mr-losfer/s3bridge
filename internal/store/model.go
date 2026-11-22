@@ -270,9 +270,9 @@ type Plugin struct {
 	Definition    string            `json:"definition,omitempty"`    // v1.x 声明式源码，仅用于迁移
 	Custom        bool              `json:"custom"`                  // 是否由 MCP/后台动态创建
 	Dir           string            `json:"dir,omitempty"`           // 插件文件夹绝对路径
-	BuiltAt       *time.Time        `json:"builtAt,omitempty"`       // 最近一次编译成功时间
-	BuildSHA      string            `json:"buildSha,omitempty"`      // 编译产物 SHA-256
-	BuildError    string            `json:"buildError,omitempty"`    // 最近一次编译错误
+	BuiltAt       *time.Time        `json:"builtAt,omitempty"`       // 最近一次加载成功时间
+	BuildSHA      string            `json:"buildSha,omitempty"`      // 最近一次成功加载的源码 SHA-256
+	BuildError    string            `json:"buildError,omitempty"`    // 最近一次加载错误
 	ValidityHours int               `json:"validityHours,omitempty"` // 图片有效性巡检间隔覆盖（小时）
 	CreatedAt     time.Time         `json:"createdAt"`
 	UpdatedAt     time.Time         `json:"updatedAt"`

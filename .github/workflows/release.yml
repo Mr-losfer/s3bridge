@@ -66,8 +66,8 @@ jobs:
           VERSION="${TAG#v}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION:-dev}" >> "$GITHUB_OUTPUT"
-      # 精简版：只能运行已编译好的插件二进制（适合只做上传转发的部署）
-      - name: 构建并推送（精简）
+      # 单镜像：插件由内嵌解释器执行，无需 Go 工具链
+      - name: 构建并推送镜像
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -76,7 +76,6 @@ jobs:
           push: true
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
-            WITH_GO=0
           tags: |
             ghcr.io/mr-losfer/s3bridge:latest
             ghcr.io/mr-losfer/s3bridge:${{ steps.meta.outputs.tag }}
@@ -86,22 +85,6 @@ jobs:
             org.opencontainers.image.source=https://github.com/Mr-losfer/s3bridge
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}
 
-      # 完整版：镜像内含 Go 工具链，可在后台/通过 MCP 直接改插件源码并即时编译
-      - name: 构建并推送（含 Go 工具链）
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: deployments/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          build-args: |
-            VERSION=${{ steps.meta.outputs.version }}
-            WITH_GO=1
-          tags: |
-            ghcr.io/mr-losfer/s3bridge:latest-go
-            ghcr.io/mr-losfer/s3bridge:${{ steps.meta.outputs.tag }}-go
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/Mr-losfer/s3bridge
             org.opencontainers.image.version=${{ steps.meta.outputs.version }}

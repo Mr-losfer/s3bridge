@@ -44,7 +44,7 @@ func (c *Client) HTTP() *http.Client { return c.hc }
 // Do 执行请求并记录追踪。响应的 Body 被包装为计数读取器，
 // 读完或关闭时补齐本次追踪的响应字节数与错误片段。
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	col := collectorFrom(req.Context())
+	col := CollectorFrom(req.Context())
 	info := traceInfo{
 		at:     time.Now(),
 		method: req.Method,
@@ -57,7 +57,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	info.duration = time.Since(start)
 	if err != nil {
 		info.err = err.Error()
-		col.add(info.trace(nil, nil))
+		col.Add(info.trace(nil, nil))
 		return nil, err
 	}
 	info.status = resp.StatusCode
@@ -68,7 +68,7 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 		onDone: func(n int64, snippet string) {
 			info.respLen = n
 			info.snippet = snippet
-			col.add(info.trace(nil, nil))
+			col.Add(info.trace(nil, nil))
 		},
 	}
 	resp.Body = wrapped

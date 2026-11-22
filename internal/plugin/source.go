@@ -208,25 +208,7 @@ func countGoFiles(dir string) (int, error) {
 	return n, nil
 }
 
-// EnsureGoMod 为插件生成独立模块，并把 SDK 指向主服务落盘的目录。
-// 已存在且内容一致时不重写，避免无谓的重新编译。
-func EnsureGoMod(dir, id, sdkDir string) error {
-	desired := fmt.Sprintf(`module s3bridge.plugin/%s
-
-go 1.21
-
-require github.com/Mr-losfer/s3bridge/sdk v0.0.0
-
-replace github.com/Mr-losfer/s3bridge/sdk => %s
-`, id, filepath.ToSlash(sdkDir))
-	path := filepath.Join(dir, "go.mod")
-	if raw, err := os.ReadFile(path); err == nil && string(raw) == desired {
-		return nil
-	}
-	return writeFileAtomic(path, []byte(desired))
-}
-
-// CheckLayout 校验文件夹可编译：至少一个 .go 文件、入口存在。
+// CheckLayout 校验文件夹可加载：至少一个 .go 文件、入口存在。
 func CheckLayout(dir string, m Manifest) error {
 	files, err := ListFiles(dir, m)
 	if err != nil {
@@ -262,7 +244,7 @@ import (
 	"github.com/Mr-losfer/s3bridge/sdk"
 )
 
-// plugin 是插件实现。你可以拆成多个文件、多个类型，甚至引入第三方库。
+// plugin 是插件实现。你可以拆成多个文件、多个类型，标准库随便用。
 type plugin struct{}
 
 func (plugin) Upload(ctx context.Context, in sdk.Input, cfg sdk.Config) (*sdk.Output, error) {
@@ -274,7 +256,7 @@ func (plugin) Check(ctx context.Context, cfg sdk.Config) error {
 	return nil
 }
 
-func main() { sdk.Serve(plugin{}) }
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 `
 
 const httpMain = `package main
@@ -339,7 +321,7 @@ func (plugin) Check(ctx context.Context, cfg sdk.Config) error {
 	return err
 }
 
-func main() { sdk.Serve(plugin{}) }
+func main() { sdk.Serve(plugin{}.Upload, plugin{}.Check) }
 `
 
 // BuiltinTemplates 返回可派生的模板列表。
