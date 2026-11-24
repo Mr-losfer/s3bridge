@@ -961,6 +961,37 @@ func (m *Manager) Delete(id, actor string) error {
 
 // ---------- 选择与调度 ----------
 
+// HealthyIDs 返回能承接该类型、且「确实可用」的插件 ID。
+//
+// 与 Select 的区别：Select 按权重挑最优，这里只做可用性过滤，
+// 由调用方随机取一个，避免同类插件里权重最高的那个吃掉全部流量。
+//
+// 判定标准比 Select 更严：状态为 unknown 的插件只有在曾经成功过
+// （LastSuccessAt 非空）时才算可用。刚装好、参数还没填的插件不参与随机，
+// 否则开放上传每次都会先撞一次必然失败的请求（比如内置插件默认地址返回 401），
+// 再回退本地，既慢又刷日志。
+func (m *Manager) HealthyIDs(category store.FileCategory) []string {
+	out := []string{}
+	_ = m.st.View(func(st *store.State) error {
+		for i := range st.Plugins {
+			p := &st.Plugins[i]
+			if !p.Enabled || !p.Supports(category) || p.Status == store.StatusUnhealthy {
+				continue
+			}
+			// 加载失败（源码有错、清单损坏）的插件一定跑不起来，直接排除。
+			if p.BuildError != "" {
+				continue
+			}
+			if p.Status != store.StatusHealthy && p.LastSuccessAt == nil {
+				continue
+			}
+			out = append(out, p.ID)
+		}
+		return nil
+	})
+	return out
+}
+
 func (m *Manager) Select(preferred string, category store.FileCategory) (string, error) {
 	var chosen string
 	var reason string

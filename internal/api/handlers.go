@@ -251,6 +251,12 @@ func (s *Server) download(c *Ctx) error {
 	if err != nil {
 		return errf(http.StatusNotFound, "not_found", "%v", err)
 	}
+	// 失效图片在列表 / 相册里走的就是这个下载口取原图，
+	// 这里同样吐占位图，否则卡片会是一张坏图或上游的错误页截图。
+	if obj.Validity.Status == store.ValidityInvalid {
+		s.serveInvalid(c.W, c.R, bucket, key)
+		return nil
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return errf(http.StatusNotFound, "not_found", "对象数据不可用")

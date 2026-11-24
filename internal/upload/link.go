@@ -78,14 +78,19 @@ func (l *LinkSigner) sign(bucket, key string, exp int64) string {
 //
 // 预览优先用上游直链：浏览器直接连第三方，主服务不转发字节，
 // 大图与视频不会占用本机带宽；上游链接缺失或临近过期时才回退到本站直链。
+// 已被巡检判定失效的对象不给上游地址：让前端改走 /f/，由 /f/ 统一吐失效占位图，
+// 否则页面上会是一张破图（上游可能已经 404，浏览器也不会告诉我们原因）。
 func (s *Service) Decorate(o *store.Object) {
 	if o == nil {
 		return
 	}
 	o.PreviewURL, o.PreviewNoReferer = "", false
-	if u, ok := previewURL(o); ok {
-		o.PreviewURL = u
-		o.PreviewNoReferer = true
+	o.Invalid = o.Validity.Status == store.ValidityInvalid
+	if !o.Invalid {
+		if u, ok := UsableRemoteURL(o); ok {
+			o.PreviewURL = u
+			o.PreviewNoReferer = true
+		}
 	}
 	o.DirectPath = ""
 	if s.links != nil {
@@ -93,10 +98,10 @@ func (s *Service) Decorate(o *store.Object) {
 	}
 }
 
-// previewURL 判断上游链接是否还能直接用于预览。
+// UsableRemoteURL 判断上游链接是否还能直接用于预览/跳转。
 // 提前一分钟视为过期，避免浏览器拿到已经失效的签名地址。
-func previewURL(o *store.Object) (string, bool) {
-	if strings.TrimSpace(o.RemoteURL) == "" {
+func UsableRemoteURL(o *store.Object) (string, bool) {
+	if o == nil || strings.TrimSpace(o.RemoteURL) == "" {
 		return "", false
 	}
 	if o.URLExpireAt != nil && time.Now().After(o.URLExpireAt.Add(-time.Minute)) {

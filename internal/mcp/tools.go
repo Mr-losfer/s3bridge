@@ -65,6 +65,11 @@ func (s *Server) Tools() []Tool {
 				"imageValidityEnabled":       boolProp("是否开启图片有效性巡检（默认开启）"),
 				"imageValidityIntervalHours": numProp("巡检间隔（小时），默认 72"),
 				"imageValidityFailThreshold": numProp("连续失败多少次判定失效，默认 2"),
+				"accessMode":                 strProp("直链出站方式：redirect（302 跳上游，默认，不占本机带宽）或 proxy（本站中转）"),
+				"invalidImageUrl":            strProp("图片失效后的占位图地址；传空串清空，留空不传则不改"),
+				"openUploadRandomBucket":     boolProp("开放上传未指定 bucket 时随机挑桶（默认 true）"),
+				"openUploadUsePlugins":       boolProp("开放上传走插件上传（默认 true）；关闭则直接本地归档"),
+				"openUploadFallbackLocal":    boolProp("插件不可用或上传失败时回退本地归档（默认 true）"),
 			})},
 		{Name: "system_update_status", Description: "查看版本更新状态：当前版本、GitHub Releases 最新版、结构化更新要点（含重点标注）、自动更新进度与部署策略",
 			InputSchema: schema(map[string]any{})},
@@ -424,6 +429,26 @@ func (s *Server) CallTool(ctx context.Context, name string, args map[string]any,
 			setStr("ftpPassivePorts", &st.Settings.FTPPassivePorts)
 			setStr("ftpPublicIp", &st.Settings.FTPPublicIP)
 			setStr("openUploadBucket", &st.Settings.OpenUploadBucket)
+			// accessMode 只接受两个取值，写错直接报错而不是静默退回默认。
+			if v := strings.TrimSpace(argString(args, "accessMode")); v != "" {
+				if v != store.AccessRedirect && v != store.AccessProxy {
+					return fmt.Errorf("accessMode 只能是 %s 或 %s", store.AccessRedirect, store.AccessProxy)
+				}
+				st.Settings.AccessMode = v
+			}
+			// 失效图允许显式清空，所以不能用 setStr（它只在非空时覆盖）。
+			if _, ok := args["invalidImageUrl"]; ok {
+				st.Settings.InvalidImageURL = strings.TrimSpace(argString(args, "invalidImageUrl"))
+			}
+			if v, ok := args["openUploadRandomBucket"]; ok {
+				st.Settings.OpenUploadRandomBucket = argBool(v, true)
+			}
+			if v, ok := args["openUploadUsePlugins"]; ok {
+				st.Settings.OpenUploadUsePlugins = argBool(v, true)
+			}
+			if v, ok := args["openUploadFallbackLocal"]; ok {
+				st.Settings.OpenUploadFallbackLocal = argBool(v, true)
+			}
 			return nil
 		}); err != nil {
 			return fail(err)

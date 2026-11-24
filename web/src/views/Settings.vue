@@ -1,6 +1,6 @@
 <script setup>
 import { ref, onMounted, computed } from 'vue'
-import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2, Images, Network, FolderTree, Terminal, Link2 } from 'lucide-vue-next'
+import { RefreshCw, Save, ShieldCheck, Info, KeyRound, Loader2, Images, Network, FolderTree, Terminal, Link2, Zap, Server, ImageOff, Shuffle, Plug } from 'lucide-vue-next'
 import { api } from '../api'
 import { notify, notifyError } from '../toast'
 import { can } from '../session'
@@ -50,6 +50,11 @@ async function load() {
       ftpPassivePorts: s?.ftpPassivePorts || '',
       ftpPublicIp: s?.ftpPublicIp || '',
       openUploadBucket: s?.openUploadBucket || 'default',
+      accessMode: s?.accessMode === 'proxy' ? 'proxy' : 'redirect',
+      invalidImageUrl: s?.invalidImageUrl || '',
+      openUploadRandomBucket: s?.openUploadRandomBucket !== false,
+      openUploadUsePlugins: s?.openUploadUsePlugins !== false,
+      openUploadFallbackLocal: s?.openUploadFallbackLocal !== false,
     }
   } catch (e) { notifyError(e, '加载系统设置失败') }
   finally { loading.value = false }
@@ -75,6 +80,11 @@ async function save() {
         ftpPassivePorts: form.value.ftpPassivePorts,
         ftpPublicIp: form.value.ftpPublicIp,
         openUploadBucket: form.value.openUploadBucket,
+        accessMode: form.value.accessMode,
+        invalidImageUrl: form.value.invalidImageUrl,
+        openUploadRandomBucket: form.value.openUploadRandomBucket,
+        openUploadUsePlugins: form.value.openUploadUsePlugins,
+        openUploadFallbackLocal: form.value.openUploadFallbackLocal,
       },
     })
     settings.value = r
@@ -99,7 +109,7 @@ async function changePassword() {
   <div>
     <PageHeader
       title="系统设置"
-      description="站点标识、默认插件、健康检测、图片巡检与接入方式（WebDAV / FTP / 开放上传）。修改后立即生效，无需重启。"
+      description="站点标识、默认插件、健康检测、图片巡检、接入方式（WebDAV / FTP / 开放上传）与文件访问策略。修改后立即生效，无需重启。"
     >
       <template #actions>
         <Button variant="outline" @click="load"><RefreshCw />刷新</Button>
@@ -260,11 +270,107 @@ async function changePassword() {
             <div class="mt-2 rounded-md bg-muted/50 px-2.5 py-2 font-mono text-[10px] leading-relaxed break-all">
               <p>POST /api/open/upload</p>
               <p>X-API-Key: sk_…</p>
-              <p class="text-muted-foreground">→ url: /f/{bucket}/{key}?e=&amp;s=</p>
+              <p class="text-muted-foreground">→ url / upstreamUrl</p>
             </div>
-            <Field label="默认存储桶" class="mt-2" hint="请求未指定 bucket 时的落点">
+
+            <label class="mt-3 flex items-start gap-2.5">
+              <Switch v-model="form.openUploadRandomBucket" :disabled="!canManage" class="mt-0.5 shrink-0" />
+              <span class="text-[11px] leading-snug">
+                <span class="flex items-center gap-1 font-medium"><Shuffle class="size-3 text-muted-foreground" />随机落桶</span>
+                <span class="text-muted-foreground">未指定 bucket 时在现有存储桶里随机挑一个</span>
+              </span>
+            </label>
+            <Field v-if="!form.openUploadRandomBucket" label="固定存储桶" class="mt-2" hint="请求未指定 bucket 时的落点">
               <Input v-model="form.openUploadBucket" :disabled="!canManage" placeholder="default" />
             </Field>
+
+            <label class="mt-2.5 flex items-start gap-2.5">
+              <Switch v-model="form.openUploadUsePlugins" :disabled="!canManage" class="mt-0.5 shrink-0" />
+              <span class="text-[11px] leading-snug">
+                <span class="flex items-center gap-1 font-medium"><Plug class="size-3 text-muted-foreground" />走插件上传</span>
+                <span class="text-muted-foreground">按文件类型随机挑一个健康插件，关闭则直接本地归档</span>
+              </span>
+            </label>
+
+            <label class="mt-2.5 flex items-start gap-2.5" :class="{ 'opacity-50': !form.openUploadUsePlugins }">
+              <Switch v-model="form.openUploadFallbackLocal" :disabled="!canManage || !form.openUploadUsePlugins" class="mt-0.5 shrink-0" />
+              <span class="text-[11px] leading-snug">
+                <span class="flex items-center gap-1 font-medium"><ShieldCheck class="size-3 text-muted-foreground" />插件不可用时回退本地</span>
+                <span class="text-muted-foreground">全部插件异常或上传失败时，仍保存到本机而不是报错</span>
+              </span>
+            </label>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+
+    <!-- 文件访问：决定 /f/ 直链的出口，默认 302 到上游，本机不承载带宽 -->
+    <Card class="mt-5">
+      <CardHeader class="pb-4">
+        <div class="flex items-center gap-2">
+          <Zap class="size-4 text-muted-foreground" />
+          <CardTitle>文件访问</CardTitle>
+        </div>
+        <CardDescription>
+          决定 <code class="rounded border bg-muted px-1 py-px font-mono text-[10.5px]">/f/</code> 直链把浏览器带到哪里。
+          默认 302 到上游 CDN，服务器只回一个跳转，不承载图片/视频流量；只有本地归档的对象才由本机输出。
+        </CardDescription>
+      </CardHeader>
+      <CardContent class="border-t pt-4">
+        <div class="grid gap-5 lg:grid-cols-2">
+          <div class="space-y-2">
+            <p class="text-[11px] font-medium text-muted-foreground">访问方式</p>
+            <button
+              type="button" :disabled="!canManage"
+              class="w-full rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed"
+              :class="form.accessMode === 'redirect' ? 'border-primary/60 bg-primary/5' : 'hover:bg-muted/50'"
+              @click="form.accessMode = 'redirect'"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="flex items-center gap-2 text-[12.5px] font-semibold"><Zap class="size-4" />302 跳转（推荐）</span>
+                <Badge v-if="form.accessMode === 'redirect'" variant="success">当前</Badge>
+              </div>
+              <p class="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                直接 <code class="font-mono">302 Location: 上游地址</code>，浏览器从 CDN 取字节。
+                服务器每次只回几百字节，适合大图与视频。
+              </p>
+            </button>
+            <button
+              type="button" :disabled="!canManage"
+              class="w-full rounded-lg border p-3 text-left transition-colors disabled:cursor-not-allowed"
+              :class="form.accessMode === 'proxy' ? 'border-primary/60 bg-primary/5' : 'hover:bg-muted/50'"
+              @click="form.accessMode = 'proxy'"
+            >
+              <div class="flex items-center justify-between gap-2">
+                <span class="flex items-center gap-2 text-[12.5px] font-semibold"><Server class="size-4" />本站中转</span>
+                <Badge v-if="form.accessMode === 'proxy'" variant="success">当前</Badge>
+              </div>
+              <p class="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                服务器拉取上游再转发（透传 Range，可拖进度条）。会占用本机带宽，
+                仅在上游禁止直连或必须固定出口时使用；上游故障自动回退本地归档。
+              </p>
+            </button>
+          </div>
+
+          <div>
+            <p class="text-[11px] font-medium text-muted-foreground">失效图片</p>
+            <Field label="占位图地址" class="mt-2" hint="图片被判失效后显示这张图；留空返回内置 SVG 占位">
+              <Input v-model="form.invalidImageUrl" :disabled="!canManage" placeholder="https://cdn.example.com/dead.png" />
+            </Field>
+            <div class="mt-2 overflow-hidden rounded-md border bg-muted/30">
+              <img
+                v-if="form.invalidImageUrl" :src="form.invalidImageUrl" referrerpolicy="no-referrer"
+                class="h-28 w-full object-contain" alt="失效图预览"
+              />
+              <div v-else class="flex h-28 flex-col items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
+                <ImageOff class="size-5" />
+                未配置，使用内置 SVG 占位（文件已失效）
+              </div>
+            </div>
+            <p class="mt-2 text-[10.5px] leading-relaxed text-muted-foreground">
+              失效由「图片有效性巡检」判定：连续失败达到阈值后标记为失效，
+              此时直链只回占位图，不再回源，也不会消耗带宽。
+            </p>
           </div>
         </div>
       </CardContent>

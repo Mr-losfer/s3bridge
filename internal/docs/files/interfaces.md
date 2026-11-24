@@ -36,7 +36,7 @@ curl -X POST http://localhost:8080/api/open/upload \
 
 | 位置 | 名称 | 说明 |
 | --- | --- | --- |
-| Query / 表单字段 | `bucket` | 目标存储桶，缺省用系统设置里的「开放上传默认桶」 |
+| Query / 表单字段 | `bucket` | 目标存储桶；留空时按系统设置「随机挑一个桶」（默认）或落到固定桶 |
 | Query / 表单字段 | `path` | 对象键；以 `/` 结尾视为目录前缀，自动拼上文件名；留空则按 `类型/年月/哈希_文件名` 生成 |
 | Query / 表单字段 | `name` | 原始文件名（原始 body 上传时使用，也可用 `X-File-Name` 头） |
 
@@ -60,14 +60,61 @@ curl -X POST http://localhost:8080/api/open/upload \
   "category": "image",
   "url": "https://bridge.example.com/f/default/image/202611/2f8a7d309c-cat.png?e=1797000000&s=…",
   "directPath": "/f/default/image/202611/2f8a7d309c-cat.png?e=1797000000&s=…",
+  "accessMode": "redirect",
+  "storage": "plugin",
+  "provider": "example",
+  "pluginId": "example",
+  "upstreamUrl": "https://cdn.example.com/uploads/2f8a7d309c-cat.png",
+  "upstreamExpiresAt": "2026-12-23T01:00:00Z",
   "createdAt": "2026-11-23T01:00:00Z"
 }
 ```
 
-`url` 是可直接嵌入 `<img>` / `<video>` / Markdown 的直链，**无需任何鉴权头**，
-默认 7 天有效；重新获取时调用 `GET /api/link/sign?bucket=&key=` 即可。
+| 字段 | 含义 |
+| --- | --- |
+| `url` | 本站直链，可直接嵌入 `<img>` / `<video>` / Markdown，无需鉴权头。按「文件访问」设置会 302 到上游或由本站转发 |
+| `upstreamUrl` | **上游返回的真实地址**（CDN 直连）。想完全绕开本站、把流量直接打到对象存储时用它 |
+| `upstreamExpiresAt` | 上游地址的过期时间；为空表示长期有效。过期后从本站直链仍可访问（会回退到本地归档） |
+| `storage` | `plugin` 表示已上传到第三方并拿到上游地址；`local` 表示只在本机归档 |
+| `provider` / `pluginId` | 实际承接这次上传的插件标识；`local` 表示走了本地回退 |
+| `accessMode` | 当前生效的访问方式：`redirect`（302 跳上游）或 `proxy`（本站中转） |
+
+`url` 默认 7 天有效；重新获取时调用 `GET /api/link/sign?bucket=&key=`（同样返回 `upstreamUrl`）。
 
 > 直链响应带 `Accept-Ranges: bytes`，视频可以拖动进度条；文件类型与文件名保持原样。
+
+### 上传落点策略
+
+开放上传默认**不写本地**，按下面的顺序决定：
+
+1. 请求带了 `bucket` → 用请求的桶；否则开启「随机落桶」时从现有桶里随机挑一个，再退回固定桶。
+2. 按文件真实类型（MIME 嗅探，不看扩展名）随机挑一个**健康插件**上传。
+   健康 = 已启用、能承接该类型、未被健康检测标记异常、且曾经成功过。
+3. 没有可用插件或插件上传失败 → 按「插件不可用时回退本地」决定：开启则本地归档，关闭则返回错误。
+
+三项策略都在「系统设置 → 接入方式 → 开放上传」里，MCP 的 `system_settings_update`
+对应字段为 `openUploadRandomBucket` / `openUploadUsePlugins` / `openUploadFallbackLocal`。
+
+### 文件访问方式：302 还是本站中转
+
+`/f/{bucket}/{key}` 对**有上游地址**的对象有两种出站方式，在「系统设置 → 文件访问」切换：
+
+| 方式 | 行为 | 带宽 |
+| --- | --- | --- |
+| `redirect`（默认） | 返回 `302 Location: 上游地址`，浏览器直接连 CDN | 本机只回几百字节 |
+| `proxy` | 服务端拉取上游再转发，透传 Range，可拖进度条 | 走本机带宽 |
+
+只有本地归档（没有上游地址）的对象才必然由本机输出。上游连不上或返回 5xx 时，
+中转模式会自动回退到本地归档副本，而不是给页面一个坏图。
+
+### 失效图片
+
+图片有效性巡检连续失败达到阈值后，对象被标记为失效：
+
+- 直链不再回源，直接返回占位图，响应头带 `X-Object-Invalid: 1`；
+- 配置了「失效图」地址 → `302` 到该图；未配置 → 返回内置 SVG 占位（「文件已失效」）；
+- 失效图指向对象自己时自动退回内置占位，不会 302 死循环；
+- 上传列表与相册里该对象的预览字段被清空，前端同样走占位图，不会出现破图。
 
 ### 直链为什么不用登录
 

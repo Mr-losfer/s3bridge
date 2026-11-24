@@ -70,7 +70,7 @@ curl -s -X POST http://localhost:8080/mcp \
 | `site_info` | 版本、运行时长、S3 接入点、插件/用户/桶/对象数量、调度器状态 | — |
 | `site_stats` | 按文件类型/桶/插件的分布、插件状态统计、告警与变更数 | — |
 | `system_settings_get` | 查看系统设置 | — |
-| `system_settings_update` | 修改站点名、默认插件、健康检测、图片有效性巡检、告警开关、公告 | `siteName` `defaultPlugin` `healthEnabled` `healthIntervalSecs` `alertOnFailure` `announcement` `imageValidityEnabled` `imageValidityIntervalHours` `imageValidityFailThreshold` |
+| `system_settings_update` | 修改站点名、默认插件、健康检测、图片有效性巡检、告警开关、公告、接入方式与文件访问策略 | `siteName` `defaultPlugin` `healthEnabled` `healthIntervalSecs` `alertOnFailure` `announcement` `imageValidityEnabled` `imageValidityIntervalHours` `imageValidityFailThreshold` `accessMode` `invalidImageUrl` `openUploadRandomBucket` `openUploadUsePlugins` `openUploadFallbackLocal` `openUploadBucket` `webdavEnabled` `ftpEnabled` `ftpAddr` `ftpPassivePorts` `ftpPublicIp` |
 | `system_update_status` | 查看当前版本、Releases 最新版、结构化更新要点（含重点标注）、自动更新进度与部署策略 | — |
 | `system_update_check` | 立即从 GitHub Releases 检测最新版本 | `force` |
 | `system_update_apply` | **一键自动更新**：下载 → SHA256 校验 → 备份 → 原子替换 → 自动重启；返回后轮询 `system_update_status` 查看进度 | — |

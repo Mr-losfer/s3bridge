@@ -186,16 +186,16 @@ func (s *Service) commit(st *staged, info commitInfo) (*store.Object, error) {
 // WebDAV / FTP / 开放上传接口使用它：这类写入没有可转发的上游，
 // 文件就存进本地桶；读取和下载与插件上传的对象完全一致。
 func (s *Service) PutLocal(_ context.Context, req PutRequest) (*store.Object, error) {
-	bucket, err := s.prepareBucket(req)
-	if err != nil {
-		return nil, err
-	}
-	st, err := s.stage(req)
+	bucket, st, err := s.prepare(req)
 	if err != nil {
 		return nil, err
 	}
 	defer st.cleanup()
+	return s.commitLocal(st, req, bucket)
+}
 
+// commitLocal 把已落盘的文件直接归档到本地，不经过插件。
+func (s *Service) commitLocal(st *staged, req PutRequest, bucket string) (*store.Object, error) {
 	key, err := s.objectKey(req.ObjectKey, st)
 	if err != nil {
 		return nil, err

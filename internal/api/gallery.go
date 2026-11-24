@@ -39,6 +39,7 @@ type galleryItem struct {
 	PreviewURL       string `json:"previewUrl,omitempty"`
 	PreviewNoReferer bool   `json:"previewNoReferer,omitempty"`
 	DirectPath       string `json:"directPath,omitempty"`
+	Invalid          bool   `json:"invalid,omitempty"`
 }
 
 type galleryBucket struct {
@@ -122,7 +123,7 @@ func (s *Server) gallery(c *Ctx) error {
 				Validity: o.Validity, CreatedAt: o.CreatedAt,
 				RemoteURL: o.RemoteURL, SHA256: o.SHA256, LocalPath: o.LocalPath,
 				PreviewURL: view.PreviewURL, PreviewNoReferer: view.PreviewNoReferer,
-				DirectPath: view.DirectPath,
+				DirectPath: view.DirectPath, Invalid: view.Invalid,
 			}
 			if o.URLExpireAt != nil {
 				item.URLExpireAt = o.URLExpireAt.Format(time.RFC3339)
@@ -207,6 +208,12 @@ func (s *Server) objectThumb(c *Ctx) error {
 	obj, path, err := s.core.Uploads.Get(bucket, key, c.UserID(), c.IsAdmin())
 	if err != nil {
 		return errf(http.StatusNotFound, "not_found", "%v", err)
+	}
+	// 失效图片不再生成缩略图：归档的那份内容多半已经是被 CDN 换掉的
+	// 错误页/空文件，压出来只会是灰块。统一交给失效占位图。
+	if obj.Validity.Status == store.ValidityInvalid {
+		s.serveInvalid(c.W, c.R, bucket, key)
+		return nil
 	}
 	if s.core.Thumbs != nil && obj.Category == store.CategoryImage {
 		if thumbPath, err := s.core.Thumbs.Get(obj.SHA256, path, width); err == nil {

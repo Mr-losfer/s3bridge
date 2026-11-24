@@ -232,16 +232,16 @@ func (c *Checker) checkOne(ctx context.Context, obj store.Object, threshold int)
 		cur.Validity.ContentType = ctype
 		cur.Validity.Error = errMsg
 		if ok {
-			cur.Validity.Status = "ok"
+			cur.Validity.Status = store.ValidityOK
 			cur.Validity.FailCount = 0
 			return nil
 		}
 		cur.Validity.FailCount++
 		if cur.Validity.FailCount >= threshold {
-			cur.Validity.Status = "invalid"
+			cur.Validity.Status = store.ValidityInvalid
 			c.raiseAlert(st, cur)
 		} else if cur.Validity.Status == "" {
-			cur.Validity.Status = "unknown"
+			cur.Validity.Status = store.ValidityUnknown
 		}
 		return nil
 	})

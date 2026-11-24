@@ -1,6 +1,7 @@
 package store
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -184,6 +185,43 @@ func TestOpenMigratesIntegrationSettings(t *testing.T) {
 		}
 		if st.Settings.FTPAddr != ":2121" {
 			t.Errorf("FTP 默认地址异常: %q", st.Settings.FTPAddr)
+		}
+		if st.Settings.AccessMode != AccessRedirect {
+			t.Errorf("访问方式应默认 302: %q", st.Settings.AccessMode)
+		}
+		if !st.Settings.OpenUploadRandomBucket || !st.Settings.OpenUploadUsePlugins || !st.Settings.OpenUploadFallbackLocal {
+			t.Errorf("开放上传策略默认值异常: %+v", st.Settings)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestOpenKeepsConfiguredAccessMode 确认迁移只补默认值，不会把用户
+// 主动改成「本站中转」的设置在下一次启动时改回 302。
+func TestOpenKeepsConfiguredAccessMode(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+	cur := DefaultSettings()
+	cur.AccessMode = AccessProxy
+	cur.OpenUploadRandomBucket = false
+	cur.OpenUploadFallbackLocal = false
+	blob, _ := json.Marshal(State{Settings: cur})
+	if err := os.WriteFile(path, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.View(func(st *State) error {
+		if st.Settings.AccessMode != AccessProxy {
+			t.Errorf("用户设置的访问方式被覆盖: %q", st.Settings.AccessMode)
+		}
+		if st.Settings.OpenUploadRandomBucket || st.Settings.OpenUploadFallbackLocal {
+			t.Errorf("用户关闭的开关被重新打开: %+v", st.Settings)
 		}
 		return nil
 	}); err != nil {

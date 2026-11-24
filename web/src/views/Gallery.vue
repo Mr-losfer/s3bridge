@@ -407,7 +407,7 @@ onUnmounted(() => {
                 <p class="flex items-center gap-1 text-[10.5px] text-muted-foreground">
                   直链
                   <span class="rounded bg-muted px-1 py-0.5 text-[9px]">
-                    {{ current.previewUrl && !boxFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range' }}
+                    {{ current.invalid ? '已失效 · 占位图' : (current.previewUrl && !boxFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range') }}
                   </span>
                 </p>
                 <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ current.directPath || '—' }}</p>

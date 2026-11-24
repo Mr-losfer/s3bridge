@@ -217,10 +217,19 @@ type Object struct {
 	// PreviewURL 是浏览器可直接加载的预览地址（优先上游直链，过期则回退本地）；
 	// PreviewNoReferer 表示该地址必须去掉 Referer 才能访问（第三方防盗链）；
 	// DirectPath 是本站签名直链 /f/{bucket}/{key}?e=&s=，支持 Range，供视频拖动。
+	// Invalid 表示该对象已被有效性巡检判定失效，前端据此显示失效占位图。
 	PreviewURL       string `json:"previewUrl,omitempty"`
 	PreviewNoReferer bool   `json:"previewNoReferer,omitempty"`
 	DirectPath       string `json:"directPath,omitempty"`
+	Invalid          bool   `json:"invalid,omitempty"`
 }
+
+// 有效性巡检的三种结论。只对本地归档的图片有意义。
+const (
+	ValidityOK      = "ok"
+	ValidityInvalid = "invalid"
+	ValidityUnknown = "unknown"
+)
 
 // ObjectValidity 记录最近一次图片有效性巡检的结果。
 // 巡检只发 HEAD 判断「是否返回图片」，不下载正文。
@@ -362,9 +371,29 @@ type Settings struct {
 	// FTP 在 Docker/NAT 后需要固定被动端口与外部通告地址，否则客户端连不上数据端口。
 	FTPPassivePorts string `json:"ftpPassivePorts"`
 	FTPPublicIP     string `json:"ftpPublicIp"`
-	// OpenUploadBucket 是开放上传不指定 bucket 时的默认落点。
+	// OpenUploadBucket 是开放上传不指定 bucket 时的固定落点（关闭随机桶时生效）。
 	OpenUploadBucket string `json:"openUploadBucket"`
+
+	// AccessMode 决定 /f/ 直链怎么把内容交给浏览器：
+	//   redirect（默认）—— 直接 302 到上游直连，本机只回一个短响应，不承载字节流量；
+	//   proxy          —— 本机拉取上游再转发，用于上游禁止直连或必须由我方出口的场景。
+	// 没有上游地址（本地归档/S3 直传）时无论如何都只能由本机输出。
+	AccessMode string `json:"accessMode"`
+	// InvalidImageURL 是图片被判失效后的占位图地址，留空则返回内置 SVG 占位。
+	InvalidImageURL string `json:"invalidImageUrl"`
+
+	// 开放上传策略：默认「随机桶 + 随机健康插件 + 失败回退本地」，
+	// 只有把 OpenUploadUsePlugins 关掉才会直接写本地（旧行为）。
+	OpenUploadRandomBucket  bool `json:"openUploadRandomBucket"`
+	OpenUploadUsePlugins    bool `json:"openUploadUsePlugins"`
+	OpenUploadFallbackLocal bool `json:"openUploadFallbackLocal"`
 }
+
+// 访问方式取值。
+const (
+	AccessRedirect = "redirect"
+	AccessProxy    = "proxy"
+)
 
 func DefaultSettings() Settings {
 	return Settings{
@@ -374,7 +403,11 @@ func DefaultSettings() Settings {
 		ImageValidityEnabled: true, ImageValidityIntervalHours: 72,
 		ImageValidityFailThreshold: 2,
 		WebDAVEnabled:              true, FTPEnabled: false, FTPAddr: ":2121",
-		OpenUploadBucket: "default",
+		OpenUploadBucket:        "default",
+		AccessMode:              AccessRedirect,
+		OpenUploadRandomBucket:  true,
+		OpenUploadUsePlugins:    true,
+		OpenUploadFallbackLocal: true,
 	}
 }
 

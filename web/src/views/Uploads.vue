@@ -257,8 +257,12 @@ function copy(text, label, id = '') {
             <component :is="categoryIcon(o)" class="size-7 text-muted-foreground/60" />
             <span class="text-[10px] text-muted-foreground">{{ previewHint(o) }}</span>
           </div>
-          <span class="absolute left-1.5 top-1.5 rounded bg-black/65 px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-white backdrop-blur-sm">
-            {{ extOf(o) }}
+          <span
+            class="absolute left-1.5 top-1.5 rounded px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide text-white backdrop-blur-sm"
+            :class="o.invalid ? 'bg-destructive/90' : 'bg-black/65'"
+            :title="o.invalid ? (o.validity?.error || '巡检确认该图片已无法返回') : o.fileName"
+          >
+            {{ o.invalid ? '已失效' : extOf(o) }}
           </span>
           <Badge variant="outline" class="absolute right-1.5 top-1.5 border-border/60 bg-background/90 backdrop-blur-sm">{{ categoryLabel(o.category) }}</Badge>
 
@@ -398,7 +402,7 @@ function copy(text, label, id = '') {
                 <p class="flex items-center gap-1 text-[10.5px] text-muted-foreground">
                   直链
                   <span class="rounded bg-muted px-1 py-0.5 text-[9px]">
-                    {{ preview.obj.previewUrl && !previewFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range' }}
+                    {{ preview.obj.invalid ? '已失效 · 占位图' : (preview.obj.previewUrl && !previewFallback ? '直连上游 · no-referrer' : '本站签名 · 支持 Range') }}
                   </span>
                 </p>
                 <p class="mt-0.5 break-all font-mono text-[10.5px]">{{ preview.obj.directPath || '—' }}</p>

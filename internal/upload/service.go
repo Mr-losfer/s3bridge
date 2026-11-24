@@ -10,6 +10,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"math/rand"
 	"mime"
 	"net/http"
 	"os"
@@ -62,13 +64,7 @@ type PutRequest struct {
 
 // Put 完成一次聚合上传：落盘 → 调度插件 → 提交归档。
 func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error) {
-	bucket, err := s.prepareBucket(req)
-	if err != nil {
-		return nil, err
-	}
-	// 先落盘再判类型：MIME 嗅探需要文件头，插件调度依赖类型，
-	// 因此把「选插件」推迟到 stage 之后。
-	st, err := s.stage(req)
+	bucket, st, err := s.prepare(req)
 	if err != nil {
 		return nil, err
 	}
@@ -79,6 +75,57 @@ func (s *Service) Put(ctx context.Context, req PutRequest) (*store.Object, error
 	if err != nil {
 		return nil, err
 	}
+	return s.uploadStaged(ctx, st, req, bucket, pluginID)
+}
+
+// PutAdaptive 是「优先第三方、失败回退本地」的上传策略，供开放上传使用。
+//
+// 关键点是只落盘一次：HTTP 请求体只能读一遍，如果先试插件、失败后再拿
+// 原始 Reader 重新本地归档，拿到的会是一个空文件。所以这里先 stage 成临时文件，
+// 后续无论走插件还是本地提交都复用这一份。
+//
+// pick 在落盘之后调用，参数是嗅探出的真实类型（扩展名可能骗人），
+// 返回空串表示当前没有可用插件，直接走本地。
+func (s *Service) PutAdaptive(ctx context.Context, req PutRequest, pick func(store.FileCategory) string, fallbackLocal bool) (*store.Object, error) {
+	bucket, st, err := s.prepare(req)
+	if err != nil {
+		return nil, err
+	}
+	defer st.cleanup()
+
+	pluginID := ""
+	if pick != nil {
+		pluginID = pick(st.category)
+	}
+	if pluginID != "" {
+		obj, err := s.uploadStaged(ctx, st, req, bucket, pluginID)
+		if err == nil {
+			return obj, nil
+		}
+		if !fallbackLocal {
+			return nil, err
+		}
+		slog.Warn("插件上传失败，回退本地归档",
+			"plugin", pluginID, "category", st.category, "err", err)
+	}
+	return s.commitLocal(st, req, bucket)
+}
+
+// prepare 建桶并落盘，返回后续复用同一份临时文件的 staged 结果。
+func (s *Service) prepare(req PutRequest) (string, *staged, error) {
+	bucket, err := s.prepareBucket(req)
+	if err != nil {
+		return "", nil, err
+	}
+	st, err := s.stage(req)
+	if err != nil {
+		return "", nil, err
+	}
+	return bucket, st, nil
+}
+
+// uploadStaged 把已落盘的文件交给指定插件，成功后归档元数据。
+func (s *Service) uploadStaged(ctx context.Context, st *staged, req PutRequest, bucket, pluginID string) (*store.Object, error) {
 	key, err := s.objectKey(req.ObjectKey, st)
 	if err != nil {
 		return nil, err
@@ -191,6 +238,16 @@ func (s *Service) BucketNames() []string {
 		return nil
 	})
 	return out
+}
+
+// RandomBucket 从现有存储桶里随机挑一个，供开放上传的「随机落桶」策略使用。
+// 没有任何桶时返回空串，由调用方决定回退到固定桶还是报错。
+func (s *Service) RandomBucket() string {
+	names := s.BucketNames()
+	if len(names) == 0 {
+		return ""
+	}
+	return names[rand.Intn(len(names))]
 }
 
 // ListFilter 支持按 bucket、文件类型、插件、用户、关键字过滤。

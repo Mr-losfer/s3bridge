@@ -77,7 +77,23 @@ func Open(path string) (*JSONStore, error) {
 			s.state.Settings.FTPAddr = ":2121"
 		}
 	}
+	// v2.3 之前的文件没有访问方式与开放上传策略字段。AccessMode 为空即旧文件：
+	// 默认 302 跳上游（不占本机带宽）、随机桶、走插件、失败回退本地。
+	// 迁移后 AccessMode 恒有值，用户在界面上改过策略也不会被下次启动覆盖。
+	if s.state.Settings.AccessMode == "" {
+		s.state.Settings.AccessMode = AccessRedirect
+		s.state.Settings.OpenUploadRandomBucket = true
+		s.state.Settings.OpenUploadUsePlugins = true
+		s.state.Settings.OpenUploadFallbackLocal = true
+	}
+	if !validAccessMode(s.state.Settings.AccessMode) {
+		s.state.Settings.AccessMode = AccessRedirect
+	}
 	return s, nil
+}
+
+func validAccessMode(m string) bool {
+	return m == AccessRedirect || m == AccessProxy
 }
 
 func (s *JSONStore) Path() string { return s.path }
